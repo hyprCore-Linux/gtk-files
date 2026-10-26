@@ -141,3 +141,7 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | `config` | TOML preferences |
 
 Uses only **Rust** and **GTK4** (no libadwaita), matching the other `gtk-*` apps in this tree.
+
+## License
+
+GNU General Public License v3.0. See [LICENSE](LICENSE).
