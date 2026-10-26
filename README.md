@@ -3,7 +3,7 @@
 A GTK4 file manager written in Rust — a feature port of **GNOME Files (Nautilus)**
 (see `../Source-Apps/nautilus`).
 
-Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
+Created by Kevin Hinds
 
 - Places sidebar (Home, XDG dirs, Computer, Trash, USB Devices, **Network** mounts, bookmarks / favorites / recent in `places.toml`)
 - **Connect to Server** (SFTP / FTP / SMB / WebDAV via GVFS) — sidebar **Connect to Network…** lists remembered remotes; mounts add a `~/Network/<name>` shortcut

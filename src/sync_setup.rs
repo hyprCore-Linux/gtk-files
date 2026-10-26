@@ -340,7 +340,7 @@ fn suite_script(name: &str) -> Option<PathBuf> {
         }
     }
 
-    // Neuronix share fallback (if staged separately from the binary).
+    // Share fallback (if staged separately from the binary).
     for share in [
         PathBuf::from("/usr/local/lib/neuronix/gtk-apps/gtk-sync"),
         PathBuf::from("/usr/share/neuronix/gtk-sync"),
@@ -578,7 +578,7 @@ fn spawn_install(
     }
 }
 
-/// Role picker matching Neuronix Settings card buttons, colored from the
+/// Role picker matching the Settings card buttons, colored from the
 /// active gtk-theme profile (not the old hardcoded greys).
 fn show_setup_role_dialog(
     parent: &impl IsA<gtk::Window>,
