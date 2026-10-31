@@ -20,6 +20,8 @@ toml = "0.8"
 dirs = "5"
 libc = "0.2"
 regex = "1"
+# gdk-pixbuf on Debian has no WebP loader. Thumbnails decode .webp here.
+image = { version = "0.25", default-features = false, features = ["webp"] }
 gtk-theme = { path = "../gtk-theme" }
 
 [profile.release]

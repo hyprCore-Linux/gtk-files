@@ -16,6 +16,7 @@ pub struct PathBar {
     pub root: gtk::Box,
     buttons: gtk::Box,
     entry: gtk::Entry,
+    edit: gtk::ToggleButton,
     stack: gtk::Stack,
     current: RefCell<PathBuf>,
     on_navigate: RefCell<Option<Rc<dyn Fn(PathBuf)>>>,
@@ -59,12 +60,22 @@ impl PathBar {
         stack.add_named(&entry_box, Some("entry"));
         stack.set_visible_child_name("path");
 
+        let edit = gtk::ToggleButton::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text("Edit location")
+            .focus_on_click(false)
+            .build();
+        edit.add_css_class("flat");
+        edit.add_css_class("pathbar-edit");
+
         root.append(&stack);
+        root.append(&edit);
 
         let bar = Rc::new(Self {
             root,
             buttons,
             entry: entry.clone(),
+            edit: edit.clone(),
             stack: stack.clone(),
             current: RefCell::new(home_dir()),
             on_navigate: RefCell::new(None),
@@ -97,6 +108,17 @@ impl PathBar {
             let bar2 = Rc::clone(&bar);
             close_btn.connect_clicked(move |_| {
                 bar2.hide_entry();
+            });
+        }
+
+        {
+            let bar2 = Rc::clone(&bar);
+            edit.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    bar2.show_entry();
+                } else {
+                    bar2.hide_entry();
+                }
             });
         }
 
@@ -133,12 +155,18 @@ impl PathBar {
         let path = self.current.borrow().clone();
         self.entry.set_text(&path.to_string_lossy());
         self.stack.set_visible_child_name("entry");
+        if !self.edit.is_active() {
+            self.edit.set_active(true);
+        }
         self.entry.grab_focus();
         self.entry.select_region(0, -1);
     }
 
     pub fn hide_entry(&self) {
         self.stack.set_visible_child_name("path");
+        if self.edit.is_active() {
+            self.edit.set_active(false);
+        }
     }
 
     pub fn set_location(&self, path: &Path) {

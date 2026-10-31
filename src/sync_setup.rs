@@ -322,7 +322,7 @@ pub fn probe_sync_status() -> SyncStatus {
 fn suite_script(name: &str) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         // Prefer the real binary path: /usr/local/bin/gtk-files is often a
-        // symlink into …/lib/neuronix/gtk-apps/, where gtk-sync/ lives.
+        // symlink into …/lib/hyprcore/gtk-apps/, where gtk-sync/ lives.
         let resolved = std::fs::canonicalize(&exe).unwrap_or(exe);
         for ancestor in resolved.ancestors().take(8) {
             let p = ancestor.join("gtk-sync").join(name);
@@ -342,8 +342,8 @@ fn suite_script(name: &str) -> Option<PathBuf> {
 
     // Share fallback (if staged separately from the binary).
     for share in [
-        PathBuf::from("/usr/local/lib/neuronix/gtk-apps/gtk-sync"),
-        PathBuf::from("/usr/share/neuronix/gtk-sync"),
+        PathBuf::from("/usr/local/lib/hyprcore/gtk-apps/gtk-sync"),
+        PathBuf::from("/usr/share/hyprcore/gtk-sync"),
     ] {
         let p = share.join(name);
         if p.is_file() {
@@ -594,7 +594,7 @@ fn show_setup_role_dialog(
         .default_width(520)
         .default_height(340)
         .build();
-    dialog.add_css_class("neuronix-choice");
+    dialog.add_css_class("hyprcore-choice");
     gtk_theme::style_dialog(&dialog);
 
     let provider = gtk::CssProvider::new();
@@ -607,21 +607,21 @@ fn show_setup_role_dialog(
     );
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    outer.add_css_class("neuronix-root");
+    outer.add_css_class("hyprcore-root");
     outer.set_margin_top(22);
     outer.set_margin_bottom(18);
     outer.set_margin_start(22);
     outer.set_margin_end(22);
 
     let title = gtk::Label::new(Some("Setup Sync"));
-    title.add_css_class("neuronix-title");
+    title.add_css_class("hyprcore-title");
     title.set_xalign(0.0);
     outer.append(&title);
 
     let subtitle = gtk::Label::new(Some(
         "Choose how this computer will use Sync — each option continues setup.",
     ));
-    subtitle.add_css_class("neuronix-subtitle");
+    subtitle.add_css_class("hyprcore-subtitle");
     subtitle.set_xalign(0.0);
     subtitle.set_wrap(true);
     outer.append(&subtitle);
@@ -629,9 +629,9 @@ fn show_setup_role_dialog(
     let list = gtk::Box::new(gtk::Orientation::Vertical, 8);
     list.set_margin_top(8);
     let server_btn =
-        neuronix_card_button("Server", "Host the sync library on this machine");
+        hyprcore_card_button("Server", "Host the sync library on this machine");
     let client_btn =
-        neuronix_card_button("Client", "Sync a folder to an existing server");
+        hyprcore_card_button("Client", "Sync a folder to an existing server");
     list.append(&server_btn);
     list.append(&client_btn);
     outer.append(&list);
@@ -640,7 +640,7 @@ fn show_setup_role_dialog(
     foot.set_halign(gtk::Align::End);
     foot.set_margin_top(8);
     let close = gtk::Button::with_label("Close");
-    close.add_css_class("neuronix-close");
+    close.add_css_class("hyprcore-close");
     foot.append(&close);
     outer.append(&foot);
 
@@ -693,9 +693,9 @@ fn show_setup_role_dialog(
     dialog.present();
 }
 
-fn neuronix_card_button(title: &str, desc: &str) -> gtk::Button {
+fn hyprcore_card_button(title: &str, desc: &str) -> gtk::Button {
     let btn = gtk::Button::new();
-    btn.add_css_class("neuronix-card");
+    btn.add_css_class("hyprcore-card");
     btn.set_hexpand(true);
     btn.set_halign(gtk::Align::Fill);
 
@@ -704,12 +704,12 @@ fn neuronix_card_button(title: &str, desc: &str) -> gtk::Button {
     inner.set_hexpand(true);
 
     let t = gtk::Label::new(Some(title));
-    t.add_css_class("neuronix-row-title");
+    t.add_css_class("hyprcore-row-title");
     t.set_xalign(0.0);
     inner.append(&t);
 
     let d = gtk::Label::new(Some(desc));
-    d.add_css_class("neuronix-row-desc");
+    d.add_css_class("hyprcore-row-desc");
     d.set_xalign(0.0);
     d.set_wrap(true);
     inner.append(&d);

@@ -7,6 +7,7 @@ mod dnd;
 mod file_ops;
 mod find_in_files;
 mod git_status;
+mod iso_write;
 mod network;
 mod open_with;
 mod pathbar;
@@ -38,7 +39,7 @@ use clipboard::SharedClipboard;
 use config::Config;
 use window::FilesWindow;
 
-const APP_ID: &str = "org.neuronix.GtkFiles";
+const APP_ID: &str = "org.hyprcore.GtkFiles";
 
 /// Sentinel rewritten from `--new-window` / `-n` so GApplication accepts it
 /// (and forwards it to a running primary instance over D-Bus).
@@ -343,6 +344,14 @@ fn load_css() {
             background-color: transparent;
             border: none;
             box-shadow: none;
+        }
+        .pathbar button.pathbar-edit {
+            margin-left: 4px;
+            padding: 4px;
+            border-radius: 6px;
+        }
+        .pathbar button.pathbar-edit:checked {
+            background-color: alpha(@theme_fg_color, 0.14);
         }
         /* Keep breadcrumbs matching the header — not the darker window bg. */
         .pathbar,

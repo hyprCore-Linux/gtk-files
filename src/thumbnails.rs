@@ -1,4 +1,5 @@
 //! Image and video thumbnails via XDG cache, gdk-pixbuf, and totem-video-thumbnailer.
+//! WebP is decoded in-process because gdk-pixbuf ships without a WebP loader.
 //!
 //! Work is capped to a small worker pool so opening a folder of thousands of
 //! large JPEGs cannot spawn unbounded threads and freeze the UI.
@@ -63,15 +64,73 @@ pub fn bump_generation() {
 
 /// Whether this file type should get a content thumbnail.
 pub fn is_thumbnailable(info: &gio::FileInfo) -> bool {
-    let Some(ct) = info.content_type() else {
-        return false;
-    };
-    let ct = ct.as_str();
-    ct.starts_with("image/") || ct.starts_with("video/")
+    if let Some(ct) = info.content_type() {
+        let ct = ct.as_str();
+        if ct.starts_with("image/") || ct.starts_with("video/") {
+            return true;
+        }
+    }
+    // Some files are named .webp before shared-mime-info calls them image/webp.
+    file_name_is_webp(info)
+}
+
+fn file_name_is_webp(info: &gio::FileInfo) -> bool {
+    path_is_webp(&info.name())
+}
+
+fn path_is_webp(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("webp"))
 }
 
 fn is_image(content_type: &str) -> bool {
     content_type.starts_with("image/")
+}
+
+/// gdk-pixbuf loads JPEG/PNG. WebP falls back to the `image` crate.
+fn load_image_scaled(path: &Path, content_type: &str, size: i32) -> Option<Pixbuf> {
+    if let Ok(pixbuf) = Pixbuf::from_file_at_scale(path, size, size, true) {
+        return Some(pixbuf);
+    }
+    if path_is_webp(path) || content_type == "image/webp" {
+        return webp_pixbuf(path, size);
+    }
+    None
+}
+
+fn webp_pixbuf(path: &Path, size: i32) -> Option<Pixbuf> {
+    let img = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let fitted = if img.width().max(img.height()) > size.max(1) as u32 {
+        img.resize(
+            size.max(1) as u32,
+            size.max(1) as u32,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    let rgba = fitted.to_rgba8();
+    let width = rgba.width() as i32;
+    let height = rgba.height() as i32;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let bytes = glib::Bytes::from_owned(rgba.into_raw());
+    Some(Pixbuf::from_bytes(
+        &bytes,
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        width,
+        height,
+        width.saturating_mul(4),
+    ))
 }
 
 fn is_video(content_type: &str) -> bool {
@@ -155,8 +214,8 @@ fn ensure_thumbnail_file(
         let _ = std::fs::remove_file(&cache_path);
     }
 
-    if is_image(content_type) {
-        let pixbuf = Pixbuf::from_file_at_scale(path, size, size, true).ok()?;
+    if is_image(content_type) || path_is_webp(path) {
+        let pixbuf = load_image_scaled(path, content_type, size)?;
         pixbuf.savev(&cache_path, "png", &[]).ok()?;
         return Some(cache_path);
     }
@@ -344,4 +403,21 @@ pub fn apply_thumbnail(
         generate_if_missing,
         weak,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webp_thumbnail_decodes() {
+        let path = std::env::temp_dir().join("gtk-files-webp-thumb-test.webp");
+        let src = image::RgbaImage::from_fn(80, 40, |x, _| image::Rgba([x as u8, 20, 30, 255]));
+        src.save(&path).expect("write webp");
+        let pixbuf = webp_pixbuf(&path, 64).expect("webp thumbnail");
+        let _ = std::fs::remove_file(&path);
+        assert!(pixbuf.width() > 0 && pixbuf.width() <= 64);
+        assert!(pixbuf.height() > 0 && pixbuf.height() <= 64);
+        assert!(pixbuf.width() > pixbuf.height());
+    }
 }

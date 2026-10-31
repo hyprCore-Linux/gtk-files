@@ -17,6 +17,7 @@ use crate::clipboard::{self, ClipOp, SharedClipboard};
 use crate::config::Config;
 use crate::file_ops;
 use crate::find_in_files;
+use crate::iso_write;
 use crate::network;
 use crate::open_with;
 use crate::pathbar::PathBar;
@@ -471,6 +472,11 @@ impl FilesWindow {
         {
             let fw2 = Rc::clone(&fw);
             window.connect_close_request(move |w| {
+                if crate::iso_write::intercept_main_window_close(w.upcast_ref())
+                    == glib::Propagation::Stop
+                {
+                    return glib::Propagation::Stop;
+                }
                 let mut c = fw2.config.borrow_mut();
                 c.window.width = w.width();
                 c.window.height = w.height();
@@ -979,6 +985,7 @@ impl FilesWindow {
             });
         }
         bind(win, "extract-here", self, |fw, _, _| fw.action_extract_here());
+        bind(win, "write-iso", self, |fw, _, _| fw.action_write_iso());
         for format in [CompressFormat::Zip, CompressFormat::TarGz] {
             bind(win, format.action_name(), self, move |fw, _, _| {
                 fw.action_compress(format);
@@ -1594,6 +1601,19 @@ impl FilesWindow {
         if n > 0 {
             self.current_tab().refresh();
         }
+    }
+
+    fn action_write_iso(&self) {
+        let paths = self.target_paths();
+        if paths.len() != 1 || !iso_write::is_iso(&paths[0]) {
+            show_error(
+                Some(&self.window),
+                "Write to USB Drive",
+                "Select a single .iso file.",
+            );
+            return;
+        }
+        iso_write::show_write_dialog(self.window.upcast_ref(), &paths[0]);
     }
 
     fn action_extract_here(&self) {
@@ -2341,6 +2361,17 @@ fn show_context_menu(
                 "win.compress-tar-gz",
             );
             icons.append_submenu(&menu, "Archive", &archive_menu, "package-x-generic-symbolic");
+        }
+
+        if paths.len() == 1 && iso_write::is_iso(&paths[0]) {
+            let usb = gio::Menu::new();
+            icons.append(
+                &usb,
+                "Write to USB Drive…",
+                "win.write-iso",
+                "drive-removable-media-symbolic",
+            );
+            menu.append_section(None, &usb);
         }
 
         // Symbolic-link actions only make sense for a single link.
