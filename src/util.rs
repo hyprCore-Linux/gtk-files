@@ -218,6 +218,12 @@ pub fn title_for_location(file: &gio::File) -> String {
     if is_trash_location(file) {
         return "Trash".into();
     }
+    if is_recent_location(file) {
+        return "Recent".into();
+    }
+    if is_bookmarks_location(file) {
+        return "Bookmarks".into();
+    }
     if let Some(path) = file.path() {
         if path == home_dir() {
             return "Home".into();
@@ -276,6 +282,40 @@ pub fn trash_file() -> gio::File {
 
 pub fn is_trash_location(file: &gio::File) -> bool {
     file.uri().starts_with("trash:")
+}
+
+/// Virtual location for the Recent folders panel (from places.toml).
+pub fn is_recent_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s == "recent:///" || s.starts_with("recent:")
+}
+
+pub fn recent_file() -> gio::File {
+    // Private scheme so DirectoryList / GVFS are never asked to enumerate it.
+    gio::File::for_uri("recent:///")
+}
+
+pub fn is_recent_location(file: &gio::File) -> bool {
+    file.uri().starts_with("recent:")
+}
+
+/// Virtual location for the Bookmarks panel (from places.toml).
+pub fn is_bookmarks_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s == "bookmarks:///" || s.starts_with("bookmarks:")
+}
+
+pub fn bookmarks_file() -> gio::File {
+    gio::File::for_uri("bookmarks:///")
+}
+
+pub fn is_bookmarks_location(file: &gio::File) -> bool {
+    file.uri().starts_with("bookmarks:")
+}
+
+/// Recent or Bookmarks virtual panels (no real DirectoryList).
+pub fn is_virtual_places_location(file: &gio::File) -> bool {
+    is_recent_location(file) || is_bookmarks_location(file)
 }
 
 pub fn open_file_default(parent: Option<&impl IsA<gtk::Window>>, file: &gio::File) {

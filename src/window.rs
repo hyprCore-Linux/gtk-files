@@ -87,6 +87,29 @@ impl FilesWindow {
 
         let header = gtk::HeaderBar::new();
         gtk_theme::prepare_headerbar(&header);
+        header.add_css_class("files-headerbar");
+
+        let (app_menu, app_icons) = build_app_menu();
+
+        // Places + hamburger + nav + path on one titlebar row (Nautilus-style).
+        // Single start box so the strip is one chrome color — no pathbar “inset”.
+        let places_label = gtk::Label::new(Some("Places"));
+        places_label.set_xalign(0.0);
+        places_label.set_hexpand(true);
+        let menu_btn = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .tooltip_text("Menu")
+            .menu_model(&app_menu)
+            .build();
+        app_icons.bind_menu_button(&menu_btn);
+        let places_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        places_header.add_css_class("places-header");
+        places_header.set_valign(gtk::Align::Center);
+        places_header.set_hexpand(false);
+        places_header.set_margin_end(4);
+        places_header.append(&places_label);
+        places_header.append(&menu_btn);
+        places_header.set_size_request(cfg.window.sidebar_width, -1);
 
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
         back_btn.set_tooltip_text(Some("Back"));
@@ -101,8 +124,6 @@ impl FilesWindow {
         nav.append(&forward_btn);
         nav.append(&up_btn);
 
-        header.pack_start(&nav);
-
         let pathbar = PathBar::new();
         // Keep breadcrumbs on the left (not as a centered title widget) so the
         // sync chip on the right can update without shifting folder location.
@@ -110,14 +131,21 @@ impl FilesWindow {
         pathbar.root.set_halign(gtk::Align::Fill);
         pathbar.root.set_margin_start(8);
         pathbar.root.set_margin_end(8);
-        header.pack_start(&pathbar.root);
+
+        let toolbar_start = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toolbar_start.add_css_class("files-toolbar-start");
+        toolbar_start.set_hexpand(true);
+        toolbar_start.set_halign(gtk::Align::Fill);
+        toolbar_start.set_valign(gtk::Align::Center);
+        toolbar_start.append(&places_header);
+        toolbar_start.append(&nav);
+        toolbar_start.append(&pathbar.root);
+        header.pack_start(&toolbar_start);
 
         let search_btn = gtk::Button::from_icon_name("edit-find-symbolic");
         search_btn.set_tooltip_text(Some("Search files under this folder"));
         let view_btn = gtk::Button::from_icon_name("view-grid-symbolic");
         view_btn.set_tooltip_text(Some("Toggle list/grid view"));
-        let new_folder_btn = gtk::Button::from_icon_name("folder-new-symbolic");
-        new_folder_btn.set_tooltip_text(Some("New folder"));
         let empty_trash_btn = gtk::Button::with_label("Empty Trash");
         empty_trash_btn.set_tooltip_text(Some("Permanently delete all items in the Trash"));
         empty_trash_btn.add_css_class("destructive-action");
@@ -146,18 +174,9 @@ impl FilesWindow {
         sync_header.append(&sync_header_label);
         sync_header.set_visible(false);
 
-        let (app_menu, app_icons) = build_app_menu();
-        let menu_btn = gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
-            .menu_model(&app_menu)
-            .build();
-        app_icons.bind_menu_button(&menu_btn);
-
         // pack_end order: first = rightmost.
         let fw_slot: Rc<RefCell<Option<Rc<FilesWindow>>>> = Rc::new(RefCell::new(None));
-        header.pack_end(&menu_btn);
         header.pack_end(&view_btn);
-        header.pack_end(&new_folder_btn);
         header.pack_end(&search_btn);
         // Fixed-width chip immediately left of the magnifying-glass.
         header.pack_end(&sync_header);
@@ -169,9 +188,12 @@ impl FilesWindow {
         let search = SearchBar::new();
 
         let notebook = gtk::Notebook::new();
+        notebook.remove_css_class("frame");
         notebook.set_scrollable(true);
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
+        // Equal-width tabs (same idea as gtk-edit document tabs).
+        notebook.add_css_class("gtk-files-tabs");
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.set_hexpand(true);
@@ -183,6 +205,7 @@ impl FilesWindow {
 
         // Placeholder; real panel wired after `fw` exists (needs callbacks).
         let tools_notebook = gtk::Notebook::new();
+        tools_notebook.remove_css_class("frame");
         tools_notebook.set_scrollable(true);
         tools_notebook.set_hexpand(true);
         tools_notebook.set_vexpand(true);
@@ -216,6 +239,15 @@ impl FilesWindow {
         paned.set_resize_start_child(false);
         paned.set_shrink_start_child(false);
         paned.set_position(cfg.window.sidebar_width);
+
+        // Keep Places header width aligned with the sidebar column.
+        {
+            let places = places_header.clone();
+            paned.connect_notify_local(Some("position"), move |p, _| {
+                let w = p.position().max(120);
+                places.set_size_request(w, -1);
+            });
+        }
 
         window.set_child(Some(&paned));
 
@@ -442,10 +474,6 @@ impl FilesWindow {
         }
         {
             let fw2 = Rc::clone(&fw);
-            new_folder_btn.connect_clicked(move |_| fw2.action_new_folder());
-        }
-        {
-            let fw2 = Rc::clone(&fw);
             notebook.connect_switch_page(move |_, page, _| {
                 let fw3 = Rc::clone(&fw2);
                 let page = page.clone();
@@ -530,17 +558,37 @@ impl FilesWindow {
         // Use a lightweight approach: wire via callbacks set below from `new`/`add_tab_rc`.
         let tab = FolderTab::new(&self.config.borrow(), start);
 
-        let title = gtk::Label::new(Some(tab.title.borrow().as_str()));
+        // Ellipsize inside the expanded tab slot (tab-expand on the notebook page).
+        let title = gtk::Label::builder()
+            .label(tab.title.borrow().as_str())
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .width_chars(4)
+            .hexpand(true)
+            .halign(gtk::Align::Fill)
+            .single_line_mode(true)
+            .xalign(0.0)
+            .build();
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.set_focus_on_click(false);
+        close.set_hexpand(false);
+        close.set_valign(gtk::Align::Center);
 
-        let tab_label = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let tab_label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        tab_label.set_hexpand(true);
+        tab_label.set_halign(gtk::Align::Fill);
+        tab_label.set_valign(gtk::Align::Fill);
         tab_label.append(&title);
         tab_label.append(&close);
 
         let page_idx = self.notebook.append_page(&tab.root, Some(&tab_label));
         self.notebook.set_tab_reorderable(&tab.root, true);
+        self.notebook.set_tab_label(&tab.root, Some(&tab_label));
+        {
+            let page = self.notebook.page(&tab.root);
+            page.set_tab_expand(true);
+            page.set_tab_fill(true);
+        }
         self.notebook.set_current_page(Some(page_idx));
 
         self.tabs.borrow_mut().push(Rc::clone(&tab));
@@ -574,6 +622,12 @@ impl FilesWindow {
                 if util::is_trash_location(&file) {
                     sidebar.select_trash();
                     pathbar.set_location(Path::new("trash:///"));
+                } else if util::is_recent_location(&file) {
+                    sidebar.select_recent();
+                    pathbar.set_location(Path::new("recent:///"));
+                } else if util::is_bookmarks_location(&file) {
+                    sidebar.select_bookmarks();
+                    pathbar.set_location(Path::new("bookmarks:///"));
                 } else if let Some(p) = file.path() {
                     if places::record_recent_folder(&p) {
                         sidebar.rebuild_debounced();
@@ -584,7 +638,7 @@ impl FilesWindow {
                 }
                 back.set_sensitive(tab_ref.can_back());
                 forward.set_sensitive(tab_ref.can_forward());
-                fw.update_trash_chrome(util::is_trash_location(&file));
+                fw.update_special_chrome();
                 // Folder changed — drop any recursive search UI state.
                 fw.search.clear_query();
             });
@@ -595,6 +649,13 @@ impl FilesWindow {
             let tab2 = Rc::clone(&tab);
             tab.set_on_open(move |file, is_dir| {
                 fw.open_activated(&tab2, file, is_dir);
+            });
+        }
+
+        {
+            let fw = Rc::clone(self);
+            tab.set_on_middle(move |file, is_dir| {
+                fw.open_middle(file, is_dir);
             });
         }
 
@@ -658,6 +719,12 @@ impl FilesWindow {
         if util::is_trash_location(&file) {
             self.sidebar.select_trash();
             self.pathbar.set_location(Path::new("trash:///"));
+        } else if util::is_recent_location(&file) {
+            self.sidebar.select_recent();
+            self.pathbar.set_location(Path::new("recent:///"));
+        } else if util::is_bookmarks_location(&file) {
+            self.sidebar.select_bookmarks();
+            self.pathbar.set_location(Path::new("bookmarks:///"));
         } else if let Some(p) = file.path() {
             self.sidebar.select_path(&p);
             self.pathbar.set_location(&p);
@@ -669,7 +736,7 @@ impl FilesWindow {
         }
         self.back_btn.set_sensitive(tab.can_back());
         self.forward_btn.set_sensitive(tab.can_forward());
-        self.update_trash_chrome(util::is_trash_location(&file));
+        self.update_special_chrome();
         self.update_sync_header();
     }
 
@@ -677,14 +744,14 @@ impl FilesWindow {
         self.tabs.borrow().len()
     }
 
-    fn update_trash_chrome(&self, in_trash: bool) {
-        self.empty_trash_btn.set_visible(in_trash);
-        // New Folder does not apply inside trash:///.
-        // Look up via titlebar children is awkward; toggle via action sensitivity instead.
+    fn update_special_chrome(&self) {
+        let tab = self.current_tab();
+        self.empty_trash_btn.set_visible(tab.is_trash());
+        // New Folder does not apply inside trash:/// or the Recent view.
         if let Some(action) = self.window.lookup_action("new-folder") {
             action
                 .downcast_ref::<gio::SimpleAction>()
-                .map(|a| a.set_enabled(!in_trash));
+                .map(|a| a.set_enabled(!(tab.is_trash() || tab.is_recent() || tab.is_bookmarks())));
         }
     }
 
@@ -717,6 +784,8 @@ impl FilesWindow {
             Place::Path(p) => gio::File::for_path(p),
             Place::Uri(uri) => gio::File::for_uri(uri),
             Place::Trash => util::trash_file(),
+            Place::Recent => util::recent_file(),
+            Place::Bookmarks => util::bookmarks_file(),
             Place::ConnectNetwork | Place::SetupSync => {
                 gio::File::for_path(network::network_home_dir())
             }
@@ -725,6 +794,12 @@ impl FilesWindow {
 
     fn open_place_in_current_tab(self: &Rc<Self>, place: &Place) {
         match place {
+            Place::Recent => {
+                self.current_tab().navigate(util::recent_file(), true);
+            }
+            Place::Bookmarks => {
+                self.current_tab().navigate(util::bookmarks_file(), true);
+            }
             Place::ConnectNetwork => {
                 self.action_connect_server();
                 return;
@@ -790,6 +865,16 @@ impl FilesWindow {
             self.sync_chrome();
             return;
         }
+        if util::is_recent_path(path) {
+            self.add_tab(Some(util::recent_file()));
+            self.sync_chrome();
+            return;
+        }
+        if util::is_bookmarks_path(path) {
+            self.add_tab(Some(util::bookmarks_file()));
+            self.sync_chrome();
+            return;
+        }
         if !path.exists() {
             return;
         }
@@ -804,6 +889,26 @@ impl FilesWindow {
             };
             let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
             new.current_tab().navigate(util::trash_file(), true);
+            new.sync_chrome();
+            new.present();
+            return;
+        }
+        if util::is_recent_path(path) {
+            let Some(app) = self.window.application() else {
+                return;
+            };
+            let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
+            new.current_tab().navigate(util::recent_file(), true);
+            new.sync_chrome();
+            new.present();
+            return;
+        }
+        if util::is_bookmarks_path(path) {
+            let Some(app) = self.window.application() else {
+                return;
+            };
+            let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
+            new.current_tab().navigate(util::bookmarks_file(), true);
             new.sync_chrome();
             new.present();
             return;
@@ -957,6 +1062,7 @@ impl FilesWindow {
         bind(win, "show-link-target", self, |fw, _, _| fw.action_show_link_target());
         bind(win, "goto-link-target", self, |fw, _, _| fw.action_goto_link_target());
         bind(win, "add-favorite", self, |fw, _, _| fw.action_add_favorite());
+        bind(win, "remove-bookmark", self, |fw, _, _| fw.action_remove_bookmark());
         bind(win, "add-bookmark", self, |fw, _, _| fw.action_add_bookmark());
         bind(win, "connect-server", self, |fw, _, _| fw.action_connect_server());
         bind(win, "show-deleted", self, |fw, _, _| fw.action_toggle_show_deleted());
@@ -1299,6 +1405,32 @@ impl FilesWindow {
         }
         if added {
             self.sidebar.rebuild();
+            if self.current_tab().is_bookmarks() {
+                self.current_tab().refresh();
+            }
+        }
+    }
+
+    fn action_remove_bookmark(&self) {
+        let paths = self.target_paths();
+        let mut removed = false;
+        for path in paths {
+            let target = if path.is_dir() {
+                path
+            } else {
+                path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or(path)
+            };
+            if places::remove_bookmark(&target) {
+                removed = true;
+            }
+        }
+        if removed {
+            self.sidebar.rebuild();
+            if self.current_tab().is_bookmarks() {
+                self.current_tab().refresh();
+            }
         }
     }
 
@@ -1544,6 +1676,21 @@ impl FilesWindow {
             } else {
                 tab.navigate(file, true);
             }
+            return;
+        }
+        if let Some(p) = file.path() {
+            if places::record_recent_for_file(&p) {
+                self.sidebar.rebuild_debounced();
+            }
+        }
+        util::open_file_default(Some(&self.window), &file);
+    }
+
+    /// Middle-click: always open folders in a new tab; files with the default app.
+    fn open_middle(self: &Rc<Self>, file: gio::File, is_dir: bool) {
+        if is_dir {
+            self.add_tab(Some(file));
+            self.sync_chrome();
             return;
         }
         if let Some(p) = file.path() {
@@ -2326,6 +2473,9 @@ fn show_context_menu(
         icons.append_action(&edit, "Create Link", "win.create-link");
         icons.append_action(&edit, "Add to Favorites", "win.add-favorite");
         icons.append_action(&edit, "Add Bookmark", "win.add-bookmark");
+        if paths.iter().any(|p| places::is_bookmark(p)) {
+            icons.append_action(&edit, "Remove Bookmark", "win.remove-bookmark");
+        }
         icons.append_action(&edit, "Rename...", "win.rename");
         menu.append_section(None, &edit);
 

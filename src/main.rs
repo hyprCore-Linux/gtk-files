@@ -431,7 +431,7 @@ fn load_css() {
             opacity: 0.4;
         }
         .sync-header-status {
-            margin-end: 4px;
+            margin-right: 4px;
             opacity: 0.9;
             min-width: 220px;
         }
@@ -440,9 +440,61 @@ fn load_css() {
             margin: 0;
             font-family: monospace;
         }
+        /* Places + hamburger in the HeaderBar, aligned with the sidebar column.
+         * Same type as Home / Recent rows (plain label, no caption/heading).
+         * Header strip color is forced at USER priority (see below). */
+        .places-header {
+            min-height: 28px;
+            padding-left: 8px;
+            padding-right: 2px;
+        }
+        .places-header label {
+            font-weight: normal;
+            font-size: inherit;
+        }
+        /* Drop Adwaita notebook frames / accent underlines / paned white lines. */
+        notebook,
+        notebook > header,
+        notebook > header > tabs,
+        notebook > header > tabs > tab,
+        notebook > header > tabs > tab:checked,
+        notebook > header.top > tabs > tab:checked,
+        notebook > header.top > tabs > tab:checked:hover,
+        notebook > header.top > tabs > tab:checked:backdrop,
+        notebook > stack {
+            border: none;
+            border-width: 0;
+            outline: none;
+            box-shadow: none;
+            background-image: none;
+        }
+        notebook > header {
+            border-color: transparent;
+        }
+        notebook > header > tabs > tab {
+            border-radius: 0;
+        }
+        notebook > header > tabs > tab:checked {
+            font-weight: 600;
+        }
+        paned > separator,
+        paned > separator.wide {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+        }
+        columnview.file-list > header,
+        columnview.file-list header,
+        columnview.file-list header button {
+            border: none;
+            box-shadow: none;
+            outline: none;
+        }
         /* Copy/move progress docked under Places (non-modal). */
         .transfer-panel {
-            border-top: 1px solid alpha(@theme_fg_color, 0.15);
+            border-top: none;
             padding-top: 6px;
         }
         .transfer-panel progressbar {
@@ -459,11 +511,47 @@ fn load_css() {
         );
     }
 
-    // Git name colors must sit at USER priority so they beat gtk-theme chrome
-    // (`label { color: fg }` loads at USER-10).
+    // USER priority: beat suite chrome / hyprcore theme for header strip + git colors.
     let git_provider = gtk::CssProvider::new();
     git_provider.load_from_data(
         "
+        /* One titlebar strip: Places + nav + path share header chrome. */
+        headerbar,
+        headerbar.default-decoration,
+        headerbar.windowhandle {
+            background: @headerbar_bg_color;
+            background-color: @headerbar_bg_color;
+            background-image: none;
+        }
+        .files-toolbar-start,
+        .places-header,
+        .pathbar,
+        .pathbar-scroll,
+        scrolledwindow.pathbar,
+        scrolledwindow.pathbar-scroll,
+        .pathbar scrolledwindow,
+        .pathbar scrolledwindow > viewport,
+        .pathbar viewport,
+        .pathbar > stack,
+        .pathbar .linked {
+            /* Hard match suite header chrome (custom profiles keep @headerbar_bg_color in sync). */
+            background: @headerbar_bg_color;
+            background-color: @headerbar_bg_color;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+        }
+        /* Fallback if named color missing — still kill window-bg plate. */
+        scrolledwindow.pathbar-scroll {
+            background-color: #363737;
+        }
+        .places-header label {
+            font-weight: normal;
+            font-size: 1em;
+            font-style: normal;
+            opacity: 1;
+            color: @headerbar_fg_color;
+        }
         label.git-untracked,
         .file-row-content.git-untracked label.git-name,
         .file-row-content.git-untracked label {

@@ -241,6 +241,76 @@ pub fn record_recent_for_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Build a `FileInfo` for a recent folder so the main list/grid can open it.
+pub fn file_info_for_recent_folder(path: &Path) -> Option<gio::FileInfo> {
+    if !path.is_dir() {
+        return None;
+    }
+    let file = gio::File::for_path(path);
+    let info = file
+        .query_info(
+            crate::util::FILE_ATTRIBUTES,
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    info.set_attribute_object("standard::file", &file);
+    // Prefer basename in the list; full path stays on the tooltip via path.
+    if let Some(name) = path.file_name() {
+        let name = name.to_string_lossy();
+        info.set_display_name(&name);
+        info.set_name(Path::new(name.as_ref()));
+    }
+    Some(info)
+}
+
+/// Build a `FileInfo` for a bookmark (local folder or remote URI).
+pub fn file_info_for_bookmark(bm: &Bookmark) -> Option<gio::FileInfo> {
+    let label = if bm.label.is_empty() {
+        bm.path
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .or_else(|| bm.uri.clone())
+            .unwrap_or_else(|| "Bookmark".into())
+    } else {
+        bm.label.clone()
+    };
+
+    if let Some(path) = bm.path.as_ref() {
+        if path.is_dir() {
+            let info = file_info_for_recent_folder(path)?;
+            info.set_display_name(&label);
+            info.set_name(Path::new(&label));
+            return Some(info);
+        }
+    }
+
+    let uri = bm.uri.as_ref()?;
+    let file = gio::File::for_uri(uri);
+    if let Ok(info) = file.query_info(
+        crate::util::FILE_ATTRIBUTES,
+        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+        gio::Cancellable::NONE,
+    ) {
+        info.set_attribute_object("standard::file", &file);
+        info.set_display_name(&label);
+        info.set_name(Path::new(&label));
+        return Some(info);
+    }
+
+    // Offline / unmounted remote — still show a folder row that can open.
+    let info = gio::FileInfo::new();
+    info.set_name(Path::new(&label));
+    info.set_display_name(&label);
+    info.set_file_type(gio::FileType::Directory);
+    info.set_content_type("inode/directory");
+    info.set_icon(&gio::ThemedIcon::new("folder"));
+    info.set_symbolic_icon(&gio::ThemedIcon::new("user-bookmarks-symbolic"));
+    info.set_attribute_object("standard::file", &file);
+    info.set_attribute_string("standard::target-uri", uri);
+    Some(info)
+}
+
 // ---------------------------------------------------------------------------
 // Bookmarks (gtk-files places.toml only)
 // ---------------------------------------------------------------------------
@@ -387,6 +457,7 @@ pub fn remove_bookmark(path: &Path) -> bool {
     removed
 }
 
+#[allow(dead_code)]
 pub fn remove_bookmark_uri(uri: &str) -> bool {
     let mut data = load();
     let before = data.bookmarks.len();

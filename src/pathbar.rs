@@ -39,6 +39,10 @@ impl PathBar {
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Never)
             .build();
+        // Keep breadcrumb scroller on header chrome — Adwaita/suite themes paint
+        // bare scrolledwindow with window bg and make the path look inset.
+        scroll.add_css_class("pathbar");
+        scroll.add_css_class("pathbar-scroll");
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         buttons.add_css_class("linked");
         scroll.set_child(Some(&buttons));
@@ -59,6 +63,7 @@ impl PathBar {
         stack.add_named(&scroll, Some("path"));
         stack.add_named(&entry_box, Some("entry"));
         stack.set_visible_child_name("path");
+        stack.add_css_class("pathbar");
 
         let edit = gtk::ToggleButton::builder()
             .icon_name("document-edit-symbolic")
@@ -70,6 +75,36 @@ impl PathBar {
 
         root.append(&stack);
         root.append(&edit);
+
+        // Paint header containers (not every * child — that fights button/icons).
+        if let Some(display) = gtk::gdk::Display::default() {
+            let provider = gtk::CssProvider::new();
+            provider.load_from_data(
+                "headerbar.files-headerbar,
+                 headerbar.files-headerbar > windowhandle,
+                 headerbar.files-headerbar .files-toolbar-start,
+                 headerbar.files-headerbar .places-header,
+                 headerbar.files-headerbar .pathbar,
+                 headerbar.files-headerbar .pathbar-scroll,
+                 headerbar.files-headerbar scrolledwindow.pathbar-scroll,
+                 headerbar.files-headerbar stack.pathbar {
+                    background-color: @headerbar_bg_color;
+                    background-image: none;
+                    border: none;
+                    box-shadow: none;
+                }
+                headerbar.files-headerbar .places-header label {
+                    font-weight: normal;
+                    font-size: inherit;
+                    color: @headerbar_fg_color;
+                }",
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        }
 
         let bar = Rc::new(Self {
             root,
@@ -204,6 +239,18 @@ impl PathBar {
             }
             self.hide_entry();
             return;
+        } else if text.starts_with("recent:") {
+            if let Some(cb) = self.on_navigate.borrow().as_ref() {
+                cb(PathBuf::from("recent:///"));
+            }
+            self.hide_entry();
+            return;
+        } else if text.starts_with("bookmarks:") {
+            if let Some(cb) = self.on_navigate.borrow().as_ref() {
+                cb(PathBuf::from("bookmarks:///"));
+            }
+            self.hide_entry();
+            return;
         } else {
             PathBuf::from(text)
         };
@@ -235,6 +282,20 @@ impl PathBar {
 
         if path.to_string_lossy() == "trash:///" || path.starts_with("trash:") {
             let btn = gtk::Button::with_label("Trash");
+            btn.add_css_class("flat");
+            btn.set_sensitive(false);
+            self.buttons.append(&btn);
+            return;
+        }
+        if path.to_string_lossy() == "recent:///" || path.starts_with("recent:") {
+            let btn = gtk::Button::with_label("Recent");
+            btn.add_css_class("flat");
+            btn.set_sensitive(false);
+            self.buttons.append(&btn);
+            return;
+        }
+        if path.to_string_lossy() == "bookmarks:///" || path.starts_with("bookmarks:") {
+            let btn = gtk::Button::with_label("Bookmarks");
             btn.add_css_class("flat");
             btn.set_sensitive(false);
             self.buttons.append(&btn);

@@ -70,6 +70,8 @@ pub struct FolderTab {
     /// True while we sync ColumnView header arrows from code (not a user click).
     sort_header_guard: Rc<Cell<bool>>,
     on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
+    /// Middle-click: folders → new tab; files → default app (caller decides).
+    on_middle: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
     on_location: RefCell<Option<Rc<dyn Fn(gio::File)>>>,
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
     on_sort: Rc<RefCell<Option<Rc<dyn Fn(String, bool)>>>>,
@@ -169,6 +171,8 @@ impl FolderTab {
 
         let on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>> =
             Rc::new(RefCell::new(None));
+        let on_middle: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>> =
+            Rc::new(RefCell::new(None));
         let on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>> =
             Rc::new(RefCell::new(None));
         let on_refresh: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -179,6 +183,7 @@ impl FolderTab {
             &tree_selection,
             Rc::clone(&tree_anchor),
             Rc::clone(&on_open),
+            Rc::clone(&on_middle),
             Rc::clone(&on_context),
             Rc::clone(&on_refresh),
         );
@@ -187,6 +192,7 @@ impl FolderTab {
             Rc::clone(&grid_anchor),
             Rc::clone(&icon_size),
             Rc::clone(&on_open),
+            Rc::clone(&on_middle),
             Rc::clone(&on_context),
             Rc::clone(&on_refresh),
         );
@@ -267,6 +273,7 @@ impl FolderTab {
             tree_sort_reversed: sort_reversed_rc,
             sort_header_guard: Rc::new(Cell::new(false)),
             on_open,
+            on_middle,
             on_location: RefCell::new(None),
             on_context,
             on_sort: Rc::new(RefCell::new(None)),
@@ -386,6 +393,10 @@ impl FolderTab {
         *self.on_open.borrow_mut() = Some(Rc::new(f));
     }
 
+    pub fn set_on_middle<F: Fn(gio::File, bool) + 'static>(&self, f: F) {
+        *self.on_middle.borrow_mut() = Some(Rc::new(f));
+    }
+
     pub fn set_on_location<F: Fn(gio::File) + 'static>(&self, f: F) {
         *self.on_location.borrow_mut() = Some(Rc::new(f));
     }
@@ -410,8 +421,26 @@ impl FolderTab {
         util::is_trash_location(&self.location.borrow())
     }
 
+    pub fn is_recent(&self) -> bool {
+        util::is_recent_location(&self.location.borrow())
+    }
+
+    pub fn is_bookmarks(&self) -> bool {
+        util::is_bookmarks_location(&self.location.borrow())
+    }
+
     pub fn navigate(&self, file: gio::File, push_history: bool) {
         // Skip reload when already here (sidebar may fire selected + activated).
+        if util::is_virtual_places_location(&file)
+            && self.location.borrow().uri() == file.uri()
+        {
+            self.rebuild_virtual_places_list(&file);
+            if let Some(cb) = self.on_location.borrow().as_ref() {
+                cb(file);
+            }
+            self.update_status();
+            return;
+        }
         if let (Some(cur), Some(next)) = (self.location.borrow().path(), file.path()) {
             let cur_c = cur.canonicalize().unwrap_or(cur);
             let next_c = next.canonicalize().unwrap_or(next);
@@ -444,8 +473,14 @@ impl FolderTab {
         // Pause the GFileMonitor while swapping — same race as refresh().
         self.directory.set_monitored(false);
         self.directory.set_file(None::<&gio::File>);
-        self.directory.set_file(Some(&file));
-        self.directory.set_monitored(true);
+        if util::is_virtual_places_location(&file) {
+            // Virtual Recent / Bookmarks — populate ghost_store; leave DirectoryList empty.
+            self.rebuild_virtual_places_list(&file);
+        } else {
+            self.ghost_store.remove_all();
+            self.directory.set_file(Some(&file));
+            self.directory.set_monitored(true);
+        }
         self.tree_selection.unselect_all();
         self.grid_selection.unselect_all();
         *self.tree_anchor.borrow_mut() = None;
@@ -453,9 +488,29 @@ impl FolderTab {
         if let Some(cb) = self.on_location.borrow().as_ref() {
             cb(file);
         }
-        self.refresh_sync_ui();
+        if !util::is_virtual_places_location(&self.location.borrow()) {
+            self.refresh_sync_ui();
+        }
         self.update_status();
         self.start_git_scan(true, false);
+    }
+
+    /// Fill the main panel from places.toml (Recent or Bookmarks).
+    fn rebuild_virtual_places_list(&self, file: &gio::File) {
+        self.ghost_store.remove_all();
+        if util::is_recent_location(file) {
+            for path in crate::places::load().recent_folders {
+                if let Some(info) = crate::places::file_info_for_recent_folder(&path) {
+                    self.ghost_store.append(&info);
+                }
+            }
+        } else if util::is_bookmarks_location(file) {
+            for bm in crate::places::load_bookmarks() {
+                if let Some(info) = crate::places::file_info_for_bookmark(&bm) {
+                    self.ghost_store.append(&info);
+                }
+            }
+        }
     }
 
     pub fn show_deleted(&self) -> bool {
@@ -524,6 +579,10 @@ impl FolderTab {
     }
 
     fn rebuild_sync_ghosts(&self) {
+        // Recent / Bookmarks views own ghost_store for the folder list.
+        if util::is_virtual_places_location(&self.location.borrow()) {
+            return;
+        }
         self.ghost_store.remove_all();
         // Don't mix tombstones into recursive search results.
         if self.searching.get() || !self.search_query.borrow().is_empty() {
@@ -568,8 +627,12 @@ impl FolderTab {
     }
 
     pub fn navigate_path(&self, path: &Path, push_history: bool) {
-        if path.to_string_lossy() == "trash:///" || path.starts_with("trash:") {
+        if util::is_trash_path(path) {
             self.navigate(util::trash_file(), push_history);
+        } else if util::is_recent_path(path) {
+            self.navigate(util::recent_file(), push_history);
+        } else if util::is_bookmarks_path(path) {
+            self.navigate(util::bookmarks_file(), push_history);
         } else {
             self.navigate(gio::File::for_path(path), push_history);
         }
@@ -600,6 +663,9 @@ impl FolderTab {
 
     pub fn go_up(&self) -> bool {
         let loc = self.location();
+        if util::is_virtual_places_location(&loc) || util::is_trash_location(&loc) {
+            return false;
+        }
         if let Some(parent) = loc.parent() {
             self.navigate(parent, true);
             true
@@ -674,6 +740,16 @@ impl FolderTab {
         if util::is_trash_location(&self.location.borrow()) {
             on_status(Some("Search is not available in Trash".into()));
             self.status.set_text("Search is not available in Trash");
+            return;
+        }
+        if util::is_recent_location(&self.location.borrow()) {
+            on_status(Some("Search is not available in Recent".into()));
+            self.status.set_text("Search is not available in Recent");
+            return;
+        }
+        if util::is_bookmarks_location(&self.location.borrow()) {
+            on_status(Some("Search is not available in Bookmarks".into()));
+            self.status.set_text("Search is not available in Bookmarks");
             return;
         }
 
@@ -901,6 +977,11 @@ impl FolderTab {
     pub fn refresh(&self) {
         thumbnails::bump_generation();
         let file = self.location();
+        if util::is_virtual_places_location(&file) {
+            self.rebuild_virtual_places_list(&file);
+            self.update_status();
+            return;
+        }
         // Pause the GFileMonitor while swapping the model. Otherwise a rename's
         // CREATED event races the new enumerator and the same file shows twice
         // until the next refresh. set_file(None) is still required — setting
@@ -1694,6 +1775,7 @@ fn build_tree_column_view(
     selection: &gtk::MultiSelection,
     anchor: Rc<RefCell<Option<u32>>>,
     on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
+    on_middle: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
     on_refresh: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 ) -> gtk::ColumnView {
@@ -1710,6 +1792,7 @@ fn build_tree_column_view(
         let selection = selection.clone();
         let anchor = Rc::clone(&anchor);
         let on_refresh = Rc::clone(&on_refresh);
+        let on_middle = Rc::clone(&on_middle);
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             item.set_activatable(true);
@@ -1841,6 +1924,24 @@ fn build_tree_column_view(
                     let paths = if paths.is_empty() { None } else { Some(paths) };
                     if let Some(cb) = on_context.borrow().as_ref() {
                         cb(paths, anchor.clone().upcast(), x, y);
+                    }
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                });
+                row.add_controller(gesture);
+            }
+
+            // Middle-click → open folder in a new tab (files → default app via callback).
+            {
+                let target = Rc::clone(&target);
+                let on_middle = Rc::clone(&on_middle);
+                let gesture = gtk::GestureClick::new();
+                gesture.set_button(gdk::BUTTON_MIDDLE);
+                gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+                gesture.connect_pressed(move |g, _, _, _| {
+                    if let Some((file, is_dir, _)) = target.borrow().clone() {
+                        if let Some(cb) = on_middle.borrow().as_ref() {
+                            cb(file, is_dir);
+                        }
                     }
                     g.set_state(gtk::EventSequenceState::Claimed);
                 });
@@ -2102,6 +2203,7 @@ fn build_grid_view(
     anchor: Rc<RefCell<Option<u32>>>,
     icon_size: Rc<RefCell<i32>>,
     on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
+    on_middle: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
     on_refresh: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 ) -> gtk::GridView {
@@ -2110,6 +2212,7 @@ fn build_grid_view(
     let anchor_for_factory = Rc::clone(&anchor);
     let icon_size_setup = Rc::clone(&icon_size);
     let on_refresh = Rc::clone(&on_refresh);
+    let on_middle = Rc::clone(&on_middle);
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         item.set_activatable(true);
@@ -2237,6 +2340,24 @@ fn build_grid_view(
                 let paths = if paths.is_empty() { None } else { Some(paths) };
                 if let Some(cb) = on_context.borrow().as_ref() {
                     cb(paths, box_widget.clone().upcast(), x, y);
+                }
+                g.set_state(gtk::EventSequenceState::Claimed);
+            });
+            box_.add_controller(gesture);
+        }
+
+        // Middle-click → open folder in a new tab (files → default app via callback).
+        {
+            let target = Rc::clone(&target);
+            let on_middle = Rc::clone(&on_middle);
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(gdk::BUTTON_MIDDLE);
+            gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+            gesture.connect_pressed(move |g, _, _, _| {
+                if let Some((file, is_dir, _)) = target.borrow().clone() {
+                    if let Some(cb) = on_middle.borrow().as_ref() {
+                        cb(file, is_dir);
+                    }
                 }
                 g.set_state(gtk::EventSequenceState::Claimed);
             });

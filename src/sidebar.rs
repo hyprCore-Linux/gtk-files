@@ -24,6 +24,10 @@ pub enum Place {
     /// Remote / non-local bookmark (e.g. sftp://).
     Uri(String),
     Trash,
+    /// Virtual Recent folders view in the main panel.
+    Recent,
+    /// Virtual Bookmarks view in the main panel.
+    Bookmarks,
     /// Opens the remembered-network connections picker.
     ConnectNetwork,
     /// Opens the gtk-sync installer (server or client dialog).
@@ -86,6 +90,7 @@ impl Sidebar {
         let transfer = crate::transfer_panel::TransferPanel::new();
         crate::transfer_panel::set_active(&transfer);
 
+        // "Places" + app menu sit in the window HeaderBar (same row as nav/pathbar).
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_hexpand(false);
         root.set_vexpand(true);
@@ -293,6 +298,26 @@ impl Sidebar {
                     i += 1;
                 }
             }
+            Place::Recent => {
+                let mut i = 0;
+                while let Some(row) = self.list.row_at_index(i) {
+                    if matches!(row_place(&row), Some(Place::Recent)) {
+                        self.list.select_row(Some(&row));
+                        return;
+                    }
+                    i += 1;
+                }
+            }
+            Place::Bookmarks => {
+                let mut i = 0;
+                while let Some(row) = self.list.row_at_index(i) {
+                    if matches!(row_place(&row), Some(Place::Bookmarks)) {
+                        self.list.select_row(Some(&row));
+                        return;
+                    }
+                    i += 1;
+                }
+            }
             Place::ConnectNetwork | Place::SetupSync => {}
         }
     }
@@ -387,6 +412,16 @@ impl Sidebar {
 
             let places_fixed: Vec<(&str, &str, Place)> = vec![
                 ("user-home-symbolic", "Home", Place::Path(home_dir())),
+                (
+                    "preferences-system-time-symbolic",
+                    "Recent",
+                    Place::Recent,
+                ),
+                (
+                    "user-bookmarks-symbolic",
+                    "Bookmarks",
+                    Place::Bookmarks,
+                ),
                 (
                     "user-desktop-symbolic",
                     "Desktop",
@@ -556,51 +591,7 @@ impl Sidebar {
                 }
             }
 
-            // Bookmarks (gtk-files places.toml only)
-            let bookmarks = places::load_bookmarks();
-            if !bookmarks.is_empty() {
-                self.list.append(&make_header("Bookmarks"));
-                for bm in bookmarks {
-                    let label = if bm.label.is_empty() {
-                        bm.path
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .or_else(|| bm.uri.clone())
-                            .unwrap_or_else(|| "Bookmark".into())
-                    } else {
-                        bm.label.clone()
-                    };
-                    let place = if let Some(ref p) = bm.path {
-                        Place::Path(p.clone())
-                    } else if let Some(ref uri) = bm.uri {
-                        Place::Uri(uri.clone())
-                    } else {
-                        Place::Path(PathBuf::from("."))
-                    };
-                    let row = make_row("user-bookmarks-symbolic", &label, place.clone());
-                    let remove = PlaceRemove::Bookmark {
-                        path: bm.path.clone(),
-                        uri: bm.uri.clone(),
-                    };
-                    install_place_context_menu(&row, place, Rc::clone(self), Some(remove));
-                    self.list.append(&row);
-                }
-            }
-
-            // Recent folders
-            if !data.recent_folders.is_empty() {
-                self.list.append(&make_header("Recent"));
-                for recent in &data.recent_folders {
-                    let name = recent
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| recent.display().to_string());
-                    let place = Place::Path(recent.clone());
-                    let row = make_row("document-open-recent-symbolic", &name, place.clone());
-                    install_place_context_menu(&row, place, Rc::clone(self), None);
-                    self.list.append(&row);
-                }
-            }
+            // Bookmarks live in the main panel via Place::Bookmarks (like Recent).
 
             if let Some(place) = restore.as_ref() {
                 self.select_place_quiet(place);
@@ -626,6 +617,20 @@ impl Sidebar {
         *self.highlight.borrow_mut() = Some(Place::Trash);
         self.with_activate_suppressed(|| {
             self.select_place_quiet(&Place::Trash);
+        });
+    }
+
+    pub fn select_recent(&self) {
+        *self.highlight.borrow_mut() = Some(Place::Recent);
+        self.with_activate_suppressed(|| {
+            self.select_place_quiet(&Place::Recent);
+        });
+    }
+
+    pub fn select_bookmarks(&self) {
+        *self.highlight.borrow_mut() = Some(Place::Bookmarks);
+        self.with_activate_suppressed(|| {
+            self.select_place_quiet(&Place::Bookmarks);
         });
     }
 
@@ -743,9 +748,8 @@ impl Sidebar {
                 bm.uri.clone().unwrap_or_default()
             ));
         }
-        for recent in &data.recent_folders {
-            parts.push(format!("r:{}", recent.display()));
-        }
+        // Recent folders live in a popover now — do not fingerprint them here
+        // or every navigate would rebuild the whole sidebar.
 
         parts.join("\n")
     }
@@ -1238,6 +1242,8 @@ fn make_row_styled(icon: &str, label: &str, place: Place, compact: bool) -> gtk:
     row.set_widget_name(match &place {
         Place::Path(_) | Place::Uri(_) => "place",
         Place::Trash => "trash",
+        Place::Recent => "recent",
+        Place::Bookmarks => "bookmarks",
         Place::ConnectNetwork => "connect-network",
         Place::SetupSync => "setup-sync",
     });
@@ -1439,10 +1445,6 @@ fn eject_or_unmount(mount: &gio::Mount) {
 
 enum PlaceRemove {
     Favorite(PathBuf),
-    Bookmark {
-        path: Option<PathBuf>,
-        uri: Option<String>,
-    },
     SyncClient,
 }
 
@@ -1450,7 +1452,6 @@ impl PlaceRemove {
     fn label(&self) -> &'static str {
         match self {
             PlaceRemove::Favorite(_) => "Remove from Favorites",
-            PlaceRemove::Bookmark { .. } => "Remove Bookmark",
             PlaceRemove::SyncClient => "Disconnect Sync Folder…",
         }
     }
@@ -1494,18 +1495,6 @@ fn install_place_context_menu(
                 PlaceRemove::Favorite(p) => {
                     places::remove_favorite(p);
                     sidebar.rebuild();
-                }
-                PlaceRemove::Bookmark { path, uri } => {
-                    let removed = if let Some(p) = path {
-                        places::remove_bookmark(p)
-                    } else if let Some(u) = uri {
-                        places::remove_bookmark_uri(u)
-                    } else {
-                        false
-                    };
-                    if removed {
-                        sidebar.rebuild();
-                    }
                 }
                 PlaceRemove::SyncClient => {
                     if let Some(cb) = sidebar.on_remove_sync_client.borrow().as_ref() {
@@ -1593,6 +1582,8 @@ fn set_row_place(row: &gtk::ListBoxRow, place: Place) {
         Place::Trash => "trash".to_string(),
         Place::Path(p) => format!("path:{}", p.to_string_lossy()),
         Place::Uri(u) => format!("uri:{u}"),
+        Place::Recent => "recent".to_string(),
+        Place::Bookmarks => "bookmarks".to_string(),
         Place::ConnectNetwork => "connect-network".to_string(),
         Place::SetupSync => "setup-sync".to_string(),
     };
@@ -1612,6 +1603,12 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
             if encoded == "trash" {
                 return Some(Place::Trash);
             }
+            if encoded == "recent" {
+                return Some(Place::Recent);
+            }
+            if encoded == "bookmarks" {
+                return Some(Place::Bookmarks);
+            }
             if encoded == "connect-network" {
                 return Some(Place::ConnectNetwork);
             }
@@ -1628,6 +1625,12 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
     }
     if name == "trash" {
         return Some(Place::Trash);
+    }
+    if name == "recent" {
+        return Some(Place::Recent);
+    }
+    if name == "bookmarks" {
+        return Some(Place::Bookmarks);
     }
     if name == "connect-network" {
         return Some(Place::ConnectNetwork);
