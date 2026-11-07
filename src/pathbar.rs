@@ -16,7 +16,6 @@ pub struct PathBar {
     pub root: gtk::Box,
     buttons: gtk::Box,
     entry: gtk::Entry,
-    edit: gtk::ToggleButton,
     stack: gtk::Stack,
     current: RefCell<PathBuf>,
     on_navigate: RefCell<Option<Rc<dyn Fn(PathBuf)>>>,
@@ -38,11 +37,13 @@ impl PathBar {
             .hexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Never)
+            .tooltip_text("Click the path to edit location")
             .build();
         // Keep breadcrumb scroller on header chrome — Adwaita/suite themes paint
         // bare scrolledwindow with window bg and make the path look inset.
         scroll.add_css_class("pathbar");
         scroll.add_css_class("pathbar-scroll");
+        scroll.add_css_class("pathbar-editable");
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         buttons.add_css_class("linked");
         scroll.set_child(Some(&buttons));
@@ -65,16 +66,7 @@ impl PathBar {
         stack.set_visible_child_name("path");
         stack.add_css_class("pathbar");
 
-        let edit = gtk::ToggleButton::builder()
-            .icon_name("document-edit-symbolic")
-            .tooltip_text("Edit location")
-            .focus_on_click(false)
-            .build();
-        edit.add_css_class("flat");
-        edit.add_css_class("pathbar-edit");
-
         root.append(&stack);
-        root.append(&edit);
 
         // Paint header containers (not every * child — that fights button/icons).
         if let Some(display) = gtk::gdk::Display::default() {
@@ -110,7 +102,6 @@ impl PathBar {
             root,
             buttons,
             entry: entry.clone(),
-            edit: edit.clone(),
             stack: stack.clone(),
             current: RefCell::new(home_dir()),
             on_navigate: RefCell::new(None),
@@ -119,16 +110,26 @@ impl PathBar {
         });
 
         {
+            // Click empty space in the path strip → edit location.
             let bar2 = Rc::clone(&bar);
             let click = gtk::GestureClick::new();
             click.set_button(1);
-            // Double-click empty path area → edit location
-            click.connect_pressed(move |_, n_press, _, _| {
-                if n_press == 2 {
-                    bar2.show_entry();
+            click.connect_released(move |gesture, n_press, x, y| {
+                if n_press != 1 {
+                    return;
                 }
+                let Some(widget) = gesture.widget() else {
+                    return;
+                };
+                if let Some(target) = widget.pick(x, y, gtk::PickFlags::DEFAULT) {
+                    // Parent crumbs are Buttons — leave those for navigation.
+                    if target.ancestor(gtk::Button::static_type()).is_some() {
+                        return;
+                    }
+                }
+                bar2.show_entry();
             });
-            bar.buttons.add_controller(click);
+            scroll.add_controller(click);
         }
 
         {
@@ -146,18 +147,7 @@ impl PathBar {
             });
         }
 
-        {
-            let bar2 = Rc::clone(&bar);
-            edit.connect_toggled(move |btn| {
-                if btn.is_active() {
-                    bar2.show_entry();
-                } else {
-                    bar2.hide_entry();
-                }
-            });
-        }
-
-        // Ctrl+Shift+L handled by window action; also support Escape in entry
+        // Ctrl+L / Escape handled by window action; also support Escape in entry
         {
             let bar2 = Rc::clone(&bar);
             let key = gtk::EventControllerKey::new();
@@ -190,18 +180,12 @@ impl PathBar {
         let path = self.current.borrow().clone();
         self.entry.set_text(&path.to_string_lossy());
         self.stack.set_visible_child_name("entry");
-        if !self.edit.is_active() {
-            self.edit.set_active(true);
-        }
         self.entry.grab_focus();
         self.entry.select_region(0, -1);
     }
 
     pub fn hide_entry(&self) {
         self.stack.set_visible_child_name("path");
-        if self.edit.is_active() {
-            self.edit.set_active(false);
-        }
     }
 
     pub fn set_location(&self, path: &Path) {
@@ -281,24 +265,15 @@ impl PathBar {
         }
 
         if path.to_string_lossy() == "trash:///" || path.starts_with("trash:") {
-            let btn = gtk::Button::with_label("Trash");
-            btn.add_css_class("flat");
-            btn.set_sensitive(false);
-            self.buttons.append(&btn);
+            self.buttons.append(&current_location_crumb("Trash"));
             return;
         }
         if path.to_string_lossy() == "recent:///" || path.starts_with("recent:") {
-            let btn = gtk::Button::with_label("Recent");
-            btn.add_css_class("flat");
-            btn.set_sensitive(false);
-            self.buttons.append(&btn);
+            self.buttons.append(&current_location_crumb("Recent"));
             return;
         }
         if path.to_string_lossy() == "bookmarks:///" || path.starts_with("bookmarks:") {
-            let btn = gtk::Button::with_label("Bookmarks");
-            btn.add_css_class("flat");
-            btn.set_sensitive(false);
-            self.buttons.append(&btn);
+            self.buttons.append(&current_location_crumb("Bookmarks"));
             return;
         }
 
@@ -346,14 +321,12 @@ impl PathBar {
             let path = comp.clone();
             let tip = path.display().to_string();
             if i == last_idx {
-                btn.set_tooltip_text(Some(&tip));
-                btn.set_sensitive(false);
+                // Current folder: click edits the full path (replaces the old pencil).
+                btn.add_css_class("pathbar-current");
+                btn.set_tooltip_text(Some(&format!("{tip}\nClick to edit location")));
+                btn.set_action_name(Some("win.edit-location"));
             } else {
                 btn.set_tooltip_text(Some(&format!("Go to {tip} (middle-click: new tab)")));
-            }
-
-            // Primary click → navigate this tab
-            if i != last_idx {
                 let on_nav = on_nav.clone();
                 let path = path.clone();
                 btn.connect_clicked(move |_| {
@@ -384,6 +357,15 @@ impl PathBar {
             self.buttons.append(&btn);
         }
     }
+}
+
+fn current_location_crumb(label: &str) -> gtk::Button {
+    let btn = gtk::Button::with_label(label);
+    btn.add_css_class("flat");
+    btn.add_css_class("pathbar-current");
+    btn.set_tooltip_text(Some("Click to edit location"));
+    btn.set_action_name(Some("win.edit-location"));
+    btn
 }
 
 fn install_crumb_menu(

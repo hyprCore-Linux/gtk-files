@@ -612,64 +612,39 @@ fn resolve_overwrite_jobs(
             let src2 = src.clone();
             let dest2 = dest.clone();
 
-            let dialog = if more {
+            let (labels, default_idx): (Vec<&str>, i32) = if more {
                 if can_merge {
-                    gtk::AlertDialog::builder()
-                        .modal(true)
-                        .message(&message)
-                        .detail(&detail)
-                        .buttons([
+                    (
+                        vec![
                             "Cancel",
                             "Skip",
                             "Skip Rest",
                             "Merge",
                             "Replace",
                             "Apply to Rest",
-                        ])
-                        .default_button(4)
-                        .cancel_button(0)
-                        .build()
+                        ],
+                        4,
+                    )
                 } else {
-                    gtk::AlertDialog::builder()
-                        .modal(true)
-                        .message(&message)
-                        .detail(&detail)
-                        .buttons([
-                            "Cancel",
-                            "Skip",
-                            "Skip Rest",
-                            "Replace",
-                            "Apply to Rest",
-                        ])
-                        .default_button(3)
-                        .cancel_button(0)
-                        .build()
+                    (
+                        vec!["Cancel", "Skip", "Skip Rest", "Replace", "Apply to Rest"],
+                        3,
+                    )
                 }
             } else if can_merge {
-                gtk::AlertDialog::builder()
-                    .modal(true)
-                    .message(&message)
-                    .detail(&detail)
-                    .buttons(["Cancel", "Skip", "Merge", "Replace"])
-                    .default_button(3)
-                    .cancel_button(0)
-                    .build()
+                (vec!["Cancel", "Skip", "Merge", "Replace"], 3)
             } else {
-                gtk::AlertDialog::builder()
-                    .modal(true)
-                    .message(&message)
-                    .detail(&detail)
-                    .buttons(["Cancel", "Skip", "Replace"])
-                    .default_button(2)
-                    .cancel_button(0)
-                    .build()
+                (vec!["Cancel", "Skip", "Replace"], 2)
             };
 
-            dialog.choose(
+            gtk_theme::present_buttons(
                 parent_for_dialog.as_ref(),
-                None::<&gio::Cancellable>,
-                move |res| {
-                    let choice = res.unwrap_or(0);
+                &message,
+                &detail,
+                &labels,
+                default_idx,
+                Some(0),
+                move |choice| {
                     let cancel = || {
                         remaining2.borrow_mut().clear();
                         finish(parent_win.clone(), Rc::clone(&accepted2), move_files, Rc::clone(&on_done2));

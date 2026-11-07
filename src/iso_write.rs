@@ -305,19 +305,15 @@ pub fn show_write_dialog(parent: &gtk::Window, iso: &Path) {
                 let write = write_for_click.clone();
                 let cancel = cancel.clone();
                 let active_write = Rc::clone(&active_write);
-                let confirm = gtk::AlertDialog::builder()
-                    .modal(true)
-                    .message("Erase USB drive?")
-                    .detail(&detail)
-                    .buttons(["Cancel", "Erase and Write"])
-                    .default_button(0)
-                    .cancel_button(0)
-                    .build();
-                confirm.choose(
+                gtk_theme::present_buttons(
                     Some(&dialog),
-                    None::<&gio::Cancellable>,
-                    move |res| {
-                        if !matches!(res, Ok(1)) {
+                    "Erase USB drive?",
+                    &detail,
+                    &["Cancel", "Erase and Write"],
+                    0,
+                    Some(0),
+                    move |choice| {
+                        if choice != 1 {
                             return;
                         }
                         if let Err(err) = drive_is_safe(&name_c) {
@@ -1044,18 +1040,14 @@ fn stop_outstanding_writes() -> bool {
 }
 
 fn ask_stop_on_close(parent: &gtk::Window, on_answer: impl Fn(bool) + 'static) {
-    let confirm = gtk::AlertDialog::builder()
-        .modal(true)
-        .message("Stop the USB write?")
-        .detail("A write is still running. Closing will stop dd and leave this drive incomplete.")
-        .buttons(["Keep writing", "Stop and close"])
-        .default_button(0)
-        .cancel_button(0)
-        .build();
-    confirm.choose(
+    gtk_theme::present_buttons(
         Some(parent),
-        None::<&gio::Cancellable>,
-        move |res| on_answer(matches!(res, Ok(1))),
+        "Stop the USB write?",
+        "A write is still running. Closing will stop dd and leave this drive incomplete.",
+        &["Keep writing", "Stop and close"],
+        0,
+        Some(0),
+        move |choice| on_answer(choice == 1),
     );
 }
 

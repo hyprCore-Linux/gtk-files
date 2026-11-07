@@ -724,13 +724,7 @@ pub fn show_restore_folder_dialog(
                     Ok(Ok(msg)) => {
                         progress_c.close();
                         if !msg.is_empty() {
-                            let d = gtk::AlertDialog::builder()
-                                .modal(true)
-                                .message("Folder restored")
-                                .detail(&msg)
-                                .buttons(["OK"])
-                                .build();
-                            d.show(Some(&parent_c));
+                            gtk_theme::present_message(Some(&parent_c), "Folder restored", &msg);
                         }
                         on_done();
                         glib::ControlFlow::Break

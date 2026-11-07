@@ -91,25 +91,50 @@ impl FilesWindow {
 
         let (app_menu, app_icons) = build_app_menu();
 
-        // Places + hamburger + nav + path on one titlebar row (Nautilus-style).
-        // Single start box so the strip is one chrome color — no pathbar “inset”.
+        // Places column (aligned with sidebar) + ellipsis menu left of nav/path.
+        // Ellipsis → "Menu" while open; File/Edit/View/Go stack vertically in a
+        // popover (gtk-files only — other suite apps keep the horizontal reveal).
         let places_label = gtk::Label::new(Some("Places"));
         places_label.set_xalign(0.0);
         places_label.set_hexpand(true);
-        let menu_btn = gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
-            .tooltip_text("Menu")
-            .menu_model(&app_menu)
-            .build();
-        app_icons.bind_menu_button(&menu_btn);
         let places_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         places_header.add_css_class("places-header");
         places_header.set_valign(gtk::Align::Center);
         places_header.set_hexpand(false);
         places_header.set_margin_end(4);
         places_header.append(&places_label);
-        places_header.append(&menu_btn);
         places_header.set_size_request(cfg.window.sidebar_width, -1);
+
+        let menu_btn = gtk::MenuButton::builder()
+            .tooltip_text("Menu")
+            .menu_model(&app_menu)
+            .css_classes(["flat", "files-menu-btn"])
+            .valign(gtk::Align::Center)
+            .build();
+        menu_btn.set_always_show_arrow(false);
+        app_icons.bind_menu_button(&menu_btn);
+
+        let ellipsis = gtk_theme::ellipsis_menu_glyph();
+        let menu_word = gtk::Label::new(Some("Menu"));
+        menu_word.add_css_class("files-menu-label");
+        let menu_face = gtk::Stack::new();
+        menu_face.set_hhomogeneous(true);
+        menu_face.set_vhomogeneous(true);
+        menu_face.set_transition_type(gtk::StackTransitionType::None);
+        menu_face.add_named(&ellipsis, Some("dots"));
+        menu_face.add_named(&menu_word, Some("menu"));
+        menu_face.set_visible_child_name("dots");
+        menu_btn.set_child(Some(&menu_face));
+        if let Some(popover) = menu_btn.popover() {
+            let face = menu_face.clone();
+            popover.connect_show(move |_| {
+                face.set_visible_child_name("menu");
+            });
+            let face = menu_face.clone();
+            popover.connect_hide(move |_| {
+                face.set_visible_child_name("dots");
+            });
+        }
 
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
         back_btn.set_tooltip_text(Some("Back"));
@@ -138,9 +163,12 @@ impl FilesWindow {
         toolbar_start.set_halign(gtk::Align::Fill);
         toolbar_start.set_valign(gtk::Align::Center);
         toolbar_start.append(&places_header);
+        toolbar_start.append(&menu_btn);
         toolbar_start.append(&nav);
         toolbar_start.append(&pathbar.root);
         header.pack_start(&toolbar_start);
+        // Empty title widget — avoid HeaderBar mirroring window.set_title().
+        header.set_title_widget(Some(&gtk::Label::new(None)));
 
         let search_btn = gtk::Button::from_icon_name("edit-find-symbolic");
         search_btn.set_tooltip_text(Some("Search files under this folder"));
@@ -1329,13 +1357,7 @@ impl FilesWindow {
                 detail.push_str("\n\n⚠ Target does not exist (broken link).");
             }
         }
-        let dialog = gtk::AlertDialog::builder()
-            .modal(true)
-            .message("Symbolic Link")
-            .detail(detail)
-            .buttons(["OK"])
-            .build();
-        dialog.show(Some(&self.window));
+        gtk_theme::present_message(Some(&self.window), "Symbolic Link", &detail);
     }
 
     /// Navigate to a symlink's target: directories open, files are revealed.

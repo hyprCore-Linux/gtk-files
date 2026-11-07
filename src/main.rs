@@ -345,13 +345,28 @@ fn load_css() {
             border: none;
             box-shadow: none;
         }
-        .pathbar button.pathbar-edit {
-            margin-left: 4px;
-            padding: 4px;
+        /* Editable path affordance — soft underline, text cursor, no pencil icon. */
+        .pathbar-editable,
+        scrolledwindow.pathbar-editable {
             border-radius: 6px;
+            border-bottom: 1px solid alpha(@theme_fg_color, 0.28);
+            padding-bottom: 1px;
+            margin-bottom: 1px;
+            cursor: text;
         }
-        .pathbar button.pathbar-edit:checked {
-            background-color: alpha(@theme_fg_color, 0.14);
+        .pathbar-editable:hover,
+        scrolledwindow.pathbar-editable:hover {
+            background-color: alpha(@theme_fg_color, 0.08);
+            border-bottom-color: alpha(@theme_fg_color, 0.45);
+        }
+        .pathbar button.pathbar-current {
+            opacity: 0.85;
+            font-weight: 600;
+        }
+        .pathbar button.pathbar-current:hover {
+            opacity: 1.0;
+            background-color: alpha(@theme_fg_color, 0.10);
+            border-radius: 6px;
         }
         /* Keep breadcrumbs matching the header — not the darker window bg. */
         .pathbar,
@@ -451,6 +466,16 @@ fn load_css() {
         .places-header label {
             font-weight: normal;
             font-size: inherit;
+        }
+        /* Ellipsis / Menu face; vertical File Edit View popover. */
+        button.files-menu-btn {
+            min-width: 48px;
+            min-height: 34px;
+            padding: 4px 8px;
+            margin-right: 4px;
+        }
+        button.files-menu-btn label.files-menu-label {
+            font-weight: 600;
         }
         /* Drop Adwaita notebook frames / accent underlines / paned white lines. */
         notebook,

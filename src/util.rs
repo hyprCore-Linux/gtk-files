@@ -423,13 +423,7 @@ pub fn open_containing_folder(parent: Option<&impl IsA<gtk::Window>>, file: &gio
 }
 
 pub fn show_error(parent: Option<&impl IsA<gtk::Window>>, title: &str, message: &str) {
-    let dialog = gtk::AlertDialog::builder()
-        .modal(true)
-        .message(title)
-        .detail(message)
-        .buttons(["OK"])
-        .build();
-    dialog.show(parent.map(|w| w.upcast_ref()));
+    gtk_theme::present_message(parent, title, message);
 }
 
 pub fn confirm_dialog(
@@ -439,22 +433,7 @@ pub fn confirm_dialog(
     confirm_label: &str,
     cb: impl FnOnce(bool) + 'static,
 ) {
-    let dialog = gtk::AlertDialog::builder()
-        .modal(true)
-        .message(title)
-        .detail(detail)
-        .buttons(["Cancel", confirm_label])
-        .default_button(1)
-        .cancel_button(0)
-        .build();
-    dialog.choose(
-        parent.map(|w| w.upcast_ref()),
-        None::<&gio::Cancellable>,
-        move |res| {
-            let ok = matches!(res, Ok(1));
-            cb(ok);
-        },
-    );
+    gtk_theme::present_confirm(parent, title, detail, confirm_label, cb);
 }
 
 /// Unique destination path when copying/moving would overwrite.
