@@ -41,6 +41,10 @@ pub struct ViewConfig {
     pub icon_size: i32,
     /// small | medium | large | larger | largest — kept in sync with icon_size.
     pub thumbnail_size: String,
+    /// View menu: show the header Dual Panel switch. Off until the user turns it on.
+    pub show_dual_panel: bool,
+    /// Header Dual Panel switch: the second folder column is open.
+    pub dual_panel: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +88,8 @@ impl Default for ViewConfig {
             sort_reversed: false,
             icon_size: 64,
             thumbnail_size: "medium".into(),
+            show_dual_panel: false,
+            dual_panel: false,
         }
     }
 }

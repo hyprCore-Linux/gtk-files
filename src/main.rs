@@ -236,6 +236,7 @@ fn install_accels(app: &gtk::Application) {
     app.set_accels_for_action("win.search", &["<Ctrl>f"]);
     app.set_accels_for_action("win.find-in-files", &["<Ctrl><Shift>f"]);
     app.set_accels_for_action("win.toggle-view", &["<Ctrl>1", "<Ctrl>2"]);
+    app.set_accels_for_action("win.dual-pane", &["<Ctrl><Alt>n"]);
     app.set_accels_for_action("win.show-hidden", &["<Ctrl>h"]);
     // Ctrl+C/X/V/A are handled by a window ShortcutController in window.rs
     // (app accels fight the embedded terminal and were unreliable).

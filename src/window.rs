@@ -40,6 +40,16 @@ pub struct FilesWindow {
     pub(crate) clipboard: SharedClipboard,
     notebook: gtk::Notebook,
     tabs: RefCell<Vec<Rc<FolderTab>>>,
+    /// File columns. The right notebook is kept alive while Dual Pane is off.
+    files_paned: gtk::Paned,
+    right_notebook: gtk::Notebook,
+    right_tabs: RefCell<Vec<Rc<FolderTab>>>,
+    active_right: Cell<bool>,
+    /// Bumped whenever a pane is chosen, so a late tab-switch cannot steal it.
+    pane_gen: Cell<u64>,
+    dual_pane: gtk::Switch,
+    dual_row: gtk::Box,
+    dual_busy: Cell<bool>,
     sidebar: Rc<Sidebar>,
     pathbar: Rc<PathBar>,
     search: Rc<SearchBar>,
@@ -202,32 +212,51 @@ impl FilesWindow {
         sync_header.append(&sync_header_label);
         sync_header.set_visible(false);
 
-        // pack_end order: first = rightmost.
+        // pack_end order: first = rightmost. Dual Pane sits just left of those.
         let fw_slot: Rc<RefCell<Option<Rc<FilesWindow>>>> = Rc::new(RefCell::new(None));
+        let dual_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        dual_row.set_valign(gtk::Align::Center);
+        dual_row.set_margin_end(8);
+        dual_row.set_tooltip_text(Some("Dual panel (Ctrl+Alt+N)"));
+        dual_row.set_visible(cfg.view.show_dual_panel);
+        let dual_label = gtk::Label::new(Some("Dual Panel"));
+        dual_label.add_css_class("dim-label");
+        let dual_pane = gtk::Switch::new();
+        dual_pane.set_valign(gtk::Align::Center);
+        dual_pane.set_tooltip_text(Some("Dual panel (Ctrl+Alt+N)"));
+        dual_pane.set_active(cfg.view.dual_panel);
+        dual_row.append(&dual_label);
+        dual_row.append(&dual_pane);
         header.pack_end(&view_btn);
         header.pack_end(&search_btn);
         // Fixed-width chip immediately left of the magnifying-glass.
         header.pack_end(&sync_header);
         // Pack after sync chip so it sits just left of search when Trash is open.
         header.pack_end(&empty_trash_btn);
+        header.pack_end(&dual_row);
         window.set_titlebar(Some(&header));
 
         let sidebar = Sidebar::new();
         let search = SearchBar::new();
 
-        let notebook = gtk::Notebook::new();
-        notebook.remove_css_class("frame");
-        notebook.set_scrollable(true);
-        notebook.set_hexpand(true);
-        notebook.set_vexpand(true);
-        // Equal-width tabs (same idea as gtk-edit document tabs).
-        notebook.add_css_class("gtk-files-tabs");
+        let notebook = make_files_notebook();
+        let right_notebook = make_files_notebook();
+
+        let files_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+        files_paned.set_hexpand(true);
+        files_paned.set_vexpand(true);
+        files_paned.set_resize_start_child(true);
+        files_paned.set_resize_end_child(true);
+        files_paned.set_shrink_start_child(true);
+        files_paned.set_shrink_end_child(true);
+        files_paned.set_wide_handle(true);
+        files_paned.set_start_child(Some(&notebook));
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.set_hexpand(true);
         content.set_vexpand(true);
         content.append(&search.root);
-        content.append(&notebook);
+        content.append(&files_paned);
 
         let terminal = TerminalPanel::new(&util::home_dir());
 
@@ -314,6 +343,14 @@ impl FilesWindow {
             },
             notebook: notebook.clone(),
             tabs: RefCell::new(Vec::new()),
+            files_paned: files_paned.clone(),
+            right_notebook: right_notebook.clone(),
+            right_tabs: RefCell::new(Vec::new()),
+            active_right: Cell::new(false),
+            pane_gen: Cell::new(0),
+            dual_pane: dual_pane.clone(),
+            dual_row: dual_row.clone(),
+            dual_busy: Cell::new(false),
             sidebar: Rc::clone(&sidebar),
             pathbar: Rc::clone(&pathbar),
             search: Rc::clone(&search),
@@ -421,7 +458,7 @@ impl FilesWindow {
         {
             let fw2 = Rc::clone(&fw);
             sidebar.set_on_client_status(move || {
-                for tab in fw2.tabs.borrow().iter() {
+                for tab in fw2.all_tabs() {
                     tab.refresh_sync_ui();
                 }
                 fw2.update_sync_header();
@@ -455,6 +492,29 @@ impl FilesWindow {
 
         // After pathbar/sidebar callbacks are wired — first tab syncs chrome into them.
         fw.add_tab(Some(gio::File::for_path(util::home_dir())));
+        {
+            let fw2 = Rc::clone(&fw);
+            dual_pane.connect_active_notify(move |sw| {
+                if fw2.dual_busy.get() {
+                    return;
+                }
+                let on = sw.is_active();
+                {
+                    let mut c = fw2.config.borrow_mut();
+                    c.view.dual_panel = on;
+                    c.save();
+                }
+                if on {
+                    fw2.open_dual_pane();
+                } else {
+                    fw2.close_dual_pane_view();
+                }
+            });
+        }
+        if cfg.view.show_dual_panel && cfg.view.dual_panel {
+            fw.open_dual_pane();
+        }
+        fw.wire_pane_switch(&right_notebook, true);
 
         {
             let fw2 = Rc::clone(&fw);
@@ -505,7 +565,12 @@ impl FilesWindow {
             notebook.connect_switch_page(move |_, page, _| {
                 let fw3 = Rc::clone(&fw2);
                 let page = page.clone();
+                fw2.note_pane(false);
+                let gen = fw2.pane_gen.get();
                 glib::idle_add_local_once(move || {
+                    if fw3.pane_gen.get() != gen {
+                        return;
+                    }
                     // Sync terminal to the tab being shown (not only pathbar/sidebar).
                     if let Some(tab) = fw3.tab_for_page(&page) {
                         if let Some(p) = tab.location().path() {
@@ -609,26 +674,37 @@ impl FilesWindow {
         tab_label.append(&title);
         tab_label.append(&close);
 
-        let page_idx = self.notebook.append_page(&tab.root, Some(&tab_label));
-        self.notebook.set_tab_reorderable(&tab.root, true);
-        self.notebook.set_tab_label(&tab.root, Some(&tab_label));
+        let right = self.active_is_right();
+        let notebook = if right {
+            self.right_notebook.clone()
+        } else {
+            self.notebook.clone()
+        };
+        let page_idx = notebook.append_page(&tab.root, Some(&tab_label));
+        notebook.set_tab_reorderable(&tab.root, true);
+        notebook.set_tab_label(&tab.root, Some(&tab_label));
         {
-            let page = self.notebook.page(&tab.root);
+            let page = notebook.page(&tab.root);
             page.set_tab_expand(true);
             page.set_tab_fill(true);
         }
-        self.notebook.set_current_page(Some(page_idx));
+        notebook.set_current_page(Some(page_idx));
 
-        self.tabs.borrow_mut().push(Rc::clone(&tab));
+        if right {
+            self.right_tabs.borrow_mut().push(Rc::clone(&tab));
+        } else {
+            self.tabs.borrow_mut().push(Rc::clone(&tab));
+        }
         install_files_tab_menu(self, &tab_label, &tab.root);
+        self.watch_pane_focus(&tab);
 
         {
             let fw_self = Rc::clone(self);
-            let notebook = self.notebook.clone();
+            let notebook = notebook.clone();
             let root = tab.root.clone();
             close.connect_clicked(move |_| {
                 if let Some(idx) = page_index_of(&notebook, &root) {
-                    fw_self.close_tab_at(idx);
+                    fw_self.close_page(&notebook, idx);
                 }
             });
         }
@@ -646,6 +722,10 @@ impl FilesWindow {
             tab.set_on_location(move |file| {
                 let name = util::title_for_location(&file);
                 title.set_text(&name);
+                // The other column can navigate without stealing Places or the path bar.
+                if !fw.tab_is_current(&tab_ref) {
+                    return;
+                }
                 window.set_title(Some(&format!("{name} — GTK Files")));
                 if util::is_trash_location(&file) {
                     sidebar.select_trash();
@@ -676,20 +756,25 @@ impl FilesWindow {
             let fw = Rc::clone(self);
             let tab2 = Rc::clone(&tab);
             tab.set_on_open(move |file, is_dir| {
+                fw.activate_tab_pane(&tab2);
                 fw.open_activated(&tab2, file, is_dir);
             });
         }
 
         {
             let fw = Rc::clone(self);
+            let tab2 = Rc::clone(&tab);
             tab.set_on_middle(move |file, is_dir| {
+                fw.activate_tab_pane(&tab2);
                 fw.open_middle(file, is_dir);
             });
         }
 
         {
             let fw = Rc::clone(self);
+            let tab2 = Rc::clone(&tab);
             tab.set_on_context(move |selection, anchor, x, y| {
+                fw.activate_tab_pane(&tab2);
                 show_context_menu(&fw, &anchor, selection, x, y);
             });
         }
@@ -716,25 +801,168 @@ impl FilesWindow {
     }
 
     pub fn current_tab(&self) -> Rc<FolderTab> {
-        // Resolve by notebook page widget — tab reorder would desync a Vec index.
-        let page = self.notebook.current_page().unwrap_or(0);
-        if let Some(widget) = self.notebook.nth_page(Some(page)) {
-            if let Some(tab) = self.tab_for_page(&widget) {
+        if self.active_is_right() {
+            if let Some(tab) = tab_on_notebook(&self.right_notebook, &self.right_tabs) {
                 return tab;
             }
+        }
+        // Resolve by notebook page widget — tab reorder would desync a Vec index.
+        if let Some(tab) = tab_on_notebook(&self.notebook, &self.tabs) {
+            return tab;
         }
         let tabs = self.tabs.borrow();
         Rc::clone(tabs.last().expect("at least one tab"))
     }
 
+    fn active_is_right(&self) -> bool {
+        self.active_right.get() && self.files_paned.end_child().is_some()
+    }
+
+    /// New tabs opened from this folder stay in its column.
+    fn activate_tab_pane(&self, tab: &Rc<FolderTab>) {
+        self.note_pane(self.tab_in_right(tab));
+    }
+
+    fn note_pane(&self, right: bool) {
+        self.pane_gen.set(self.pane_gen.get().wrapping_add(1));
+        self.active_right
+            .set(right && self.files_paned.end_child().is_some());
+    }
+
+    fn tab_is_current(&self, tab: &Rc<FolderTab>) -> bool {
+        let tabs = if self.tab_in_right(tab) {
+            &self.right_tabs
+        } else {
+            &self.tabs
+        };
+        let notebook = if self.tab_in_right(tab) {
+            &self.right_notebook
+        } else {
+            &self.notebook
+        };
+        let Some(current) = tab_on_notebook(notebook, tabs) else {
+            return false;
+        };
+        Rc::ptr_eq(&current, tab) && self.tab_in_right(tab) == self.active_is_right()
+    }
+
+    fn tab_in_right(&self, tab: &Rc<FolderTab>) -> bool {
+        self.right_tabs.borrow().iter().any(|t| Rc::ptr_eq(t, tab))
+    }
+
+    fn all_tabs(&self) -> Vec<Rc<FolderTab>> {
+        let mut tabs = self.tabs.borrow().clone();
+        tabs.extend(self.right_tabs.borrow().iter().cloned());
+        tabs
+    }
+
     fn tab_for_page(&self, page: &gtk::Widget) -> Option<Rc<FolderTab>> {
-        let tabs = self.tabs.borrow();
-        tabs.iter()
-            .find(|t| {
+        for tabs in [&self.tabs, &self.right_tabs] {
+            if let Some(tab) = tabs.borrow().iter().find(|t| {
                 let root: gtk::Widget = t.root.clone().upcast();
                 &root == page
-            })
-            .cloned()
+            }).cloned() {
+                return Some(tab);
+            }
+        }
+        None
+    }
+
+    fn watch_pane_focus(self: &Rc<Self>, tab: &Rc<FolderTab>) {
+        for view in [
+            tab.list_view.clone().upcast::<gtk::Widget>(),
+            tab.grid_view.clone().upcast::<gtk::Widget>(),
+        ] {
+            let fw = Rc::clone(self);
+            let tab = Rc::clone(tab);
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_enter(move |_| {
+                fw.note_pane(fw.tab_in_right(&tab));
+                fw.sync_chrome();
+            });
+            view.add_controller(focus);
+        }
+    }
+
+    fn wire_pane_switch(self: &Rc<Self>, notebook: &gtk::Notebook, right: bool) {
+        let fw = Rc::clone(self);
+        notebook.connect_switch_page(move |_, page, _| {
+            let fw = Rc::clone(&fw);
+            let page = page.clone();
+            fw.note_pane(right);
+            let gen = fw.pane_gen.get();
+            glib::idle_add_local_once(move || {
+                if fw.pane_gen.get() != gen {
+                    return;
+                }
+                if let Some(tab) = fw.tab_for_page(&page) {
+                    if let Some(p) = tab.location().path() {
+                        fw.terminal.sync_cwd_force(&p);
+                    }
+                    tab.grab_files_focus();
+                }
+                fw.sync_chrome();
+            });
+        });
+    }
+
+    /// Right-hand folder column at half the width. The left column stays put.
+    fn open_dual_pane(self: &Rc<Self>) {
+        if self.files_paned.end_child().is_some() {
+            self.sync_dual_switch(true);
+            self.place_files_half();
+            return;
+        }
+        self.files_paned.set_end_child(Some(&self.right_notebook));
+        self.active_right.set(true);
+        if self.right_tabs.borrow().is_empty() {
+            let start = tab_on_notebook(&self.notebook, &self.tabs)
+                .map(|t| t.location())
+                .unwrap_or_else(|| gio::File::for_path(util::home_dir()));
+            let tab = self.add_tab(Some(start));
+            tab.grab_files_focus();
+        } else if let Some(tab) = tab_on_notebook(&self.right_notebook, &self.right_tabs) {
+            tab.grab_files_focus();
+        }
+        self.sync_chrome();
+        self.sync_dual_switch(true);
+        self.place_files_half();
+    }
+
+    fn close_dual_pane_view(&self) {
+        self.active_right.set(false);
+        self.files_paned.set_end_child(None::<&gtk::Widget>);
+        if let Some(tab) = tab_on_notebook(&self.notebook, &self.tabs) {
+            tab.grab_files_focus();
+        }
+        self.sync_chrome();
+    }
+
+    fn close_dual_pane(&self) {
+        self.close_dual_pane_view();
+        self.sync_dual_switch(false);
+    }
+
+    fn sync_dual_switch(&self, on: bool) {
+        if self.dual_pane.is_active() == on {
+            return;
+        }
+        let was = self.dual_busy.get();
+        self.dual_busy.set(true);
+        self.dual_pane.set_active(on);
+        self.dual_busy.set(was);
+    }
+
+    fn place_files_half(&self) {
+        let paned = self.files_paned.clone();
+        glib::idle_add_local(move || {
+            let w = paned.width();
+            if w > 1 {
+                paned.set_position(w / 2);
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     pub fn sync_chrome(&self) {
@@ -994,6 +1222,39 @@ impl FilesWindow {
         bind(win, "close-tab", self, |fw, _, _| {
             fw.close_current_tab();
         });
+        bind(win, "dual-pane", self, |fw, _, _| {
+            if !fw.dual_row.is_visible() {
+                return;
+            }
+            fw.dual_pane.set_active(!fw.dual_pane.is_active());
+        });
+        {
+            let show = self.config.borrow().view.show_dual_panel;
+            let action = gio::SimpleAction::new_stateful(
+                "show-dual-panel",
+                None,
+                &show.to_variant(),
+            );
+            let fw = Rc::clone(self);
+            action.connect_change_state(move |action, state| {
+                let active = state.and_then(|s| s.get::<bool>()).unwrap_or(false);
+                fw.dual_row.set_visible(active);
+                {
+                    let mut c = fw.config.borrow_mut();
+                    c.view.show_dual_panel = active;
+                    c.save();
+                }
+                if active {
+                    if fw.dual_pane.is_active() {
+                        fw.open_dual_pane();
+                    }
+                } else {
+                    fw.close_dual_pane_view();
+                }
+                action.set_state(&active.to_variant());
+            });
+            win.add_action(&action);
+        }
         bind(win, "new-window", self, |fw, _, _| {
             let app = fw.window.application().unwrap();
             let new = FilesWindow::new(&app, Rc::clone(&fw.config), Rc::clone(&fw.clipboard));
@@ -1160,26 +1421,54 @@ impl FilesWindow {
     }
 
     fn close_current_tab(self: &Rc<Self>) {
-        let page = self.notebook.current_page().unwrap_or(0);
-        self.close_tab_at(page);
+        let notebook = if self.active_is_right() {
+            self.right_notebook.clone()
+        } else {
+            self.notebook.clone()
+        };
+        let page = notebook.current_page().unwrap_or(0);
+        self.close_page(&notebook, page);
     }
 
     fn close_tab_at(self: &Rc<Self>, page: u32) {
-        let page_widget = self.notebook.nth_page(Some(page));
-        self.notebook.remove_page(Some(page));
-        {
-            if let Some(widget) = page_widget {
-                self.tabs.borrow_mut().retain(|t| {
-                    let root: gtk::Widget = t.root.clone().upcast();
-                    root != widget
-                });
-            }
-            if self.tabs.borrow().is_empty() {
+        self.close_page(&self.notebook.clone(), page);
+    }
+
+    fn close_page(self: &Rc<Self>, notebook: &gtk::Notebook, page: u32) {
+        let right = notebook == &self.right_notebook;
+        let page_widget = notebook.nth_page(Some(page));
+        notebook.remove_page(Some(page));
+        if let Some(widget) = page_widget {
+            let tabs = if right { &self.right_tabs } else { &self.tabs };
+            tabs.borrow_mut().retain(|t| {
+                let root: gtk::Widget = t.root.clone().upcast();
+                root != widget
+            });
+        }
+        let empty = if right {
+            self.right_tabs.borrow().is_empty()
+        } else {
+            self.tabs.borrow().is_empty()
+        };
+        if empty {
+            if right {
+                self.active_right.set(true);
+                let tab = self.add_tab(Some(gio::File::for_path(util::home_dir())));
+                tab.grab_files_focus();
+                self.sync_chrome();
+            } else if self.right_tabs.borrow().is_empty()
+                || self.files_paned.end_child().is_none()
+            {
                 // No permanent home tab — closing the last tab closes the window.
                 self.window.close();
             } else {
+                self.active_right.set(false);
+                let tab = self.add_tab(Some(gio::File::for_path(util::home_dir())));
+                tab.grab_files_focus();
                 self.sync_chrome();
             }
+        } else {
+            self.sync_chrome();
         }
     }
 
@@ -1205,20 +1494,24 @@ impl FilesWindow {
         }
     }
 
+    fn notebook_of(&self, widget: &gtk::Widget) -> Option<(gtk::Notebook, u32)> {
+        for notebook in [&self.notebook, &self.right_notebook] {
+            if let Some(idx) = page_index_of(notebook, widget) {
+                return Some((notebook.clone(), idx));
+            }
+        }
+        None
+    }
+
     /// Move a folder tab into a brand-new window (shell stays on the remaining tabs).
     fn move_tab_to_new_window(self: &Rc<Self>, page: u32) {
-        let location = self
-            .notebook
-            .nth_page(Some(page))
-            .and_then(|widget| {
-                let tabs = self.tabs.borrow();
-                tabs.iter()
-                    .find(|t| {
-                        let root: gtk::Widget = t.root.clone().upcast();
-                        root == widget
-                    })
-                    .map(|t| t.location())
-            });
+        self.move_tab_to_new_window_from(&self.notebook.clone(), page);
+    }
+
+    fn move_tab_to_new_window_from(self: &Rc<Self>, notebook: &gtk::Notebook, page: u32) {
+        let location = notebook.nth_page(Some(page)).and_then(|widget| {
+            self.tab_for_page(&widget).map(|t| t.location())
+        });
         let Some(location) = location else {
             return;
         };
@@ -1226,7 +1519,7 @@ impl FilesWindow {
             return;
         };
         // Don't leave the source window empty without a tab.
-        if self.notebook.n_pages() <= 1 {
+        if notebook.n_pages() <= 1 && self.tabs.borrow().len() + self.right_tabs.borrow().len() <= 1 {
             let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
             // Replace the default home tab with this location.
             if let Some(p) = location.path() {
@@ -1237,7 +1530,7 @@ impl FilesWindow {
             new.present();
             return;
         }
-        self.close_tab_at(page);
+        self.close_page(notebook, page);
         let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
         if let Some(p) = location.path() {
             new.current_tab().navigate_path(&p, true);
@@ -1267,7 +1560,7 @@ impl FilesWindow {
     }
 
     fn refresh_clipboard_visuals(&self) {
-        for tab in self.tabs.borrow().iter() {
+        for tab in self.all_tabs() {
             tab.refresh_clipboard_ui();
         }
     }
@@ -1550,7 +1843,7 @@ impl FilesWindow {
         let refresh_tab = Rc::clone(tab);
         let dest = dir.to_path_buf();
         if !clipboard::is_empty(&clip) {
-            let tabs_snap: Vec<Rc<FolderTab>> = self.tabs.borrow().iter().cloned().collect();
+            let tabs_snap: Vec<Rc<FolderTab>> = self.all_tabs();
             file_ops::paste_into(Some(&window), &dest, &clip, move || {
                 refresh_tab.refresh();
                 for t in &tabs_snap {
@@ -2304,8 +2597,8 @@ fn install_files_tab_menu(
         let root = page_root.clone().upcast::<gtk::Widget>();
         let close = gio::SimpleAction::new("close", None);
         close.connect_activate(move |_, _| {
-            if let Some(idx) = page_index_of(&fw.notebook, &root) {
-                fw.close_tab_at(idx);
+            if let Some((notebook, idx)) = fw.notebook_of(&root) {
+                fw.close_page(&notebook, idx);
             }
         });
         group.add_action(&close);
@@ -2315,8 +2608,8 @@ fn install_files_tab_menu(
         let root = page_root.clone().upcast::<gtk::Widget>();
         let move_act = gio::SimpleAction::new("new-window", None);
         move_act.connect_activate(move |_, _| {
-            if let Some(idx) = page_index_of(&fw.notebook, &root) {
-                fw.move_tab_to_new_window(idx);
+            if let Some((notebook, idx)) = fw.notebook_of(&root) {
+                fw.move_tab_to_new_window_from(&notebook, idx);
             }
         });
         group.add_action(&move_act);
@@ -2357,6 +2650,28 @@ fn install_files_tab_menu(
         });
     }
     tab_label.add_controller(gesture);
+}
+
+fn make_files_notebook() -> gtk::Notebook {
+    let notebook = gtk::Notebook::new();
+    notebook.remove_css_class("frame");
+    notebook.set_scrollable(true);
+    notebook.set_hexpand(true);
+    notebook.set_vexpand(true);
+    notebook.add_css_class("gtk-files-tabs");
+    notebook
+}
+
+fn tab_on_notebook(
+    notebook: &gtk::Notebook,
+    tabs: &RefCell<Vec<Rc<FolderTab>>>,
+) -> Option<Rc<FolderTab>> {
+    let page = notebook.current_page()?;
+    let widget = notebook.nth_page(Some(page))?;
+    tabs.borrow().iter().find(|t| {
+        let root: gtk::Widget = t.root.clone().upcast();
+        root == widget
+    }).cloned()
 }
 
 fn page_index_of(notebook: &gtk::Notebook, widget: &impl IsA<gtk::Widget>) -> Option<u32> {
@@ -2408,6 +2723,8 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
 
     let view = gio::Menu::new();
     icons.append_action(&view, "Reload", "win.reload");
+    // Check item: shows or hides the header switch. The switch is the second setting.
+    view.append(Some("Dual Panel"), Some("win.show-dual-panel"));
     icons.append_action(&view, "Toggle List/Grid", "win.toggle-view");
     // Toggle item: plain append so GTK can show a checkmark.
     view.append(Some("Show Hidden Files"), Some("win.show-hidden"));
