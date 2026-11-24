@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -23,8 +23,10 @@ use gtk::glib;
 pub enum GitDecor {
     /// Untracked or newly added (`??`, `A`).
     Untracked,
-    /// Tracked dirty (modified, deleted, renamed, …).
+    /// Tracked edits that are not deletions (`M`, `R`, `T`, `C`).
     Modified,
+    /// Deleted from the index or the work tree (`D`).
+    Deleted,
     /// Unmerged / both-added / both-deleted.
     Conflict,
 }
@@ -34,6 +36,7 @@ impl GitDecor {
         match self {
             Self::Untracked => "git-untracked",
             Self::Modified => "git-modified",
+            Self::Deleted => "git-deleted",
             Self::Conflict => "git-conflict",
         }
     }
@@ -42,6 +45,7 @@ impl GitDecor {
         match self {
             Self::Untracked => "New",
             Self::Modified => "Modified",
+            Self::Deleted => "Deleted",
             Self::Conflict => "Conflict",
         }
     }
@@ -50,7 +54,8 @@ impl GitDecor {
         match self {
             Self::Untracked => 1,
             Self::Modified => 2,
-            Self::Conflict => 3,
+            Self::Deleted => 3,
+            Self::Conflict => 4,
         }
     }
 
@@ -86,6 +91,18 @@ struct GitCache {
     statuses: HashMap<PathBuf, RepoStatus>,
     last_find: HashMap<PathBuf, Instant>,
     roots_loaded: bool,
+}
+
+static COLORS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether name colors should be painted. The header switch and the View
+/// menu item both have to be on, matching gtk-term.
+pub fn set_colors_enabled(on: bool) {
+    COLORS_ENABLED.store(on, AtomicOrdering::Relaxed);
+}
+
+pub fn colors_enabled() -> bool {
+    COLORS_ENABLED.load(AtomicOrdering::Relaxed)
 }
 
 fn cache() -> &'static Mutex<GitCache> {
@@ -444,6 +461,9 @@ fn classify_xy(xy: &str) -> Option<GitDecor> {
     if a == 'U' || b == 'U' || xy == "AA" || xy == "DD" {
         return Some(GitDecor::Conflict);
     }
+    if a == 'D' || b == 'D' {
+        return Some(GitDecor::Deleted);
+    }
     if xy == "??" || xy == "!!" {
         return if xy == "??" {
             Some(GitDecor::Untracked)
@@ -632,7 +652,8 @@ mod tests {
         assert_eq!(classify_xy("AM"), Some(GitDecor::Modified));
         assert_eq!(classify_xy(" M"), Some(GitDecor::Modified));
         assert_eq!(classify_xy("M "), Some(GitDecor::Modified));
-        assert_eq!(classify_xy("D "), Some(GitDecor::Modified));
+        assert_eq!(classify_xy("D "), Some(GitDecor::Deleted));
+        assert_eq!(classify_xy(" D"), Some(GitDecor::Deleted));
         assert_eq!(classify_xy("!!"), None);
     }
 

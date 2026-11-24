@@ -2,11 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
+use gtk4 as gtk;
 
 /// Attributes requested from GtkDirectoryList / FileInfo queries.
 pub const FILE_ATTRIBUTES: &str = concat!(
@@ -16,6 +16,24 @@ pub const FILE_ATTRIBUTES: &str = concat!(
     "standard::is-symlink,standard::symlink-target,time::modified,access::can-read,",
     "access::can-write,access::can-execute,trash::orig-path,trash::deletion-date"
 );
+
+/// Remote listings (SFTP and other GVFS schemes). Omits content-type sniffing,
+/// access checks, and symlink targets — each of those is another round trip.
+pub const REMOTE_FILE_ATTRIBUTES: &str = concat!(
+    "standard::name,standard::display-name,standard::icon,",
+    "standard::symbolic-icon,standard::type,",
+    "standard::size,standard::is-hidden,standard::is-backup,",
+    "standard::is-symlink,time::modified,trash::orig-path,trash::deletion-date"
+);
+
+/// Attribute string for a directory listing. Remote mounts skip the expensive set.
+pub fn listing_attributes(remote: bool) -> &'static str {
+    if remote {
+        REMOTE_FILE_ATTRIBUTES
+    } else {
+        FILE_ATTRIBUTES
+    }
+}
 
 pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
@@ -76,8 +94,7 @@ pub fn is_directory(info: &gio::FileInfo) -> bool {
 /// Hidden / backup flag — MTP and some GVFS backends omit these attributes
 /// even when requested; calling `is_hidden()` then emits a GIO critical.
 pub fn is_hidden(info: &gio::FileInfo) -> bool {
-    let flagged = info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN)
-        && info.is_hidden();
+    let flagged = info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN) && info.is_hidden();
     let backup = info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_BACKUP) && info.is_backup();
     flagged || backup || display_name(info).starts_with('.')
 }
@@ -124,15 +141,32 @@ pub fn content_type_label(info: &gio::FileInfo) -> String {
     if is_directory(info) {
         return "Folder".into();
     }
-    info.content_type()
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "Unknown".into())
+    effective_content_type(info).unwrap_or_else(|| "Unknown".into())
+}
+
+/// Content type already on the file info, or a local guess from the file name.
+/// The guess does not read file bytes, so it is safe on SFTP.
+pub fn effective_content_type(info: &gio::FileInfo) -> Option<String> {
+    if let Some(ct) = info.content_type() {
+        if !ct.is_empty() {
+            return Some(ct.to_string());
+        }
+    }
+    if is_directory(info) {
+        return None;
+    }
+    let name = info.name();
+    let (ctype, _uncertain) = gio::content_type_guess(Some(name.as_path()), &[]);
+    if ctype.is_empty() {
+        None
+    } else {
+        Some(ctype.to_string())
+    }
 }
 
 pub fn icon_for_info(info: &gio::FileInfo, symbolic: bool) -> gio::Icon {
     let raw = if symbolic {
-        info.symbolic_icon()
-            .or_else(|| info.icon())
+        info.symbolic_icon().or_else(|| info.icon())
     } else {
         info.icon()
     };
@@ -141,6 +175,7 @@ pub fn icon_for_info(info: &gio::FileInfo, symbolic: bool) -> gio::Icon {
     // first name the theme actually has, else a plain text-file icon.
     let base = raw
         .and_then(|icon| usable_icon(icon))
+        .or_else(|| icon_from_filename(info, symbolic))
         .unwrap_or_else(|| fallback_icon(info));
 
     // Prefer overlay badges in the list/grid views; still attach emblems here
@@ -184,6 +219,20 @@ fn usable_icon(icon: gio::Icon) -> Option<gio::Icon> {
         }
     }
     None
+}
+
+/// Icon from the filename when the listing did not include `content-type`.
+fn icon_from_filename(info: &gio::FileInfo, symbolic: bool) -> Option<gio::Icon> {
+    if info.content_type().is_some() {
+        return None;
+    }
+    let ct = effective_content_type(info)?;
+    let icon = if symbolic {
+        gio::content_type_get_symbolic_icon(&ct)
+    } else {
+        gio::content_type_get_icon(&ct)
+    };
+    usable_icon(icon)
 }
 
 fn fallback_icon(info: &gio::FileInfo) -> gio::Icon {
@@ -330,15 +379,11 @@ pub fn open_file_default(parent: Option<&impl IsA<gtk::Window>>, file: &gio::Fil
             eprintln!("no default handler: {e}");
             let launcher = gtk::FileLauncher::new(Some(file));
             let parent = parent.map(|w| w.clone().upcast::<gtk::Window>());
-            launcher.launch(
-                parent.as_ref(),
-                None::<&gio::Cancellable>,
-                move |res| {
-                    if let Err(err) = res {
-                        eprintln!("FileLauncher failed: {err}");
-                    }
-                },
-            );
+            launcher.launch(parent.as_ref(), None::<&gio::Cancellable>, move |res| {
+                if let Err(err) = res {
+                    eprintln!("FileLauncher failed: {err}");
+                }
+            });
             // Also try xdg-open immediately as a reliable fallback for local files.
             fallback_xdg_open(file);
         }
@@ -397,7 +442,13 @@ pub fn open_terminal_here(dir: &Path) -> Result<(), String> {
         }
     }
 
-    for bin in ["gtk-term", "x-terminal-emulator", "kgx", "gnome-terminal", "xterm"] {
+    for bin in [
+        "gtk-term",
+        "x-terminal-emulator",
+        "kgx",
+        "gnome-terminal",
+        "xterm",
+    ] {
         let mut cmd = std::process::Command::new(bin);
         match bin {
             "gtk-term" | "x-terminal-emulator" | "kgx" | "gnome-terminal" => {
@@ -464,7 +515,7 @@ pub fn content_type_description(info: &gio::FileInfo) -> String {
     if is_directory(info) {
         return "Folder".into();
     }
-    let Some(ct) = info.content_type() else {
+    let Some(ct) = effective_content_type(info) else {
         return "Unknown".into();
     };
     gio::content_type_get_description(&ct).to_string()

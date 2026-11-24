@@ -50,6 +50,10 @@ pub struct FilesWindow {
     dual_pane: gtk::Switch,
     dual_row: gtk::Box,
     dual_busy: Cell<bool>,
+    git_colors: gtk::Switch,
+    git_row: gtk::Box,
+    /// True while the … bar is showing File / Edit / View / Go.
+    menu_open: Cell<bool>,
     sidebar: Rc<Sidebar>,
     pathbar: Rc<PathBar>,
     search: Rc<SearchBar>,
@@ -101,9 +105,19 @@ impl FilesWindow {
 
         let (app_menu, app_icons) = build_app_menu();
 
-        // Places column (aligned with sidebar) + ellipsis menu left of nav/path.
-        // Ellipsis → "Menu" while open; File/Edit/View/Go stack vertically in a
-        // popover (gtk-files only — other suite apps keep the horizontal reveal).
+        // Same reveal as the other suite apps: … swaps for a horizontal
+        // File / Edit / View / Go bar. Places stays the left column.
+        let reveal_menubar = gtk_theme::install_reveal_menubar(
+            &header,
+            &window,
+            "GTK Files",
+            &app_menu,
+            Some(&app_icons),
+        );
+        if let Some(title_box) = reveal_menubar.title.parent() {
+            header.remove(&title_box);
+        }
+
         let places_label = gtk::Label::new(Some("Places"));
         places_label.set_xalign(0.0);
         places_label.set_hexpand(true);
@@ -114,37 +128,6 @@ impl FilesWindow {
         places_header.set_margin_end(4);
         places_header.append(&places_label);
         places_header.set_size_request(cfg.window.sidebar_width, -1);
-
-        let menu_btn = gtk::MenuButton::builder()
-            .tooltip_text("Menu")
-            .menu_model(&app_menu)
-            .css_classes(["flat", "files-menu-btn"])
-            .valign(gtk::Align::Center)
-            .build();
-        menu_btn.set_always_show_arrow(false);
-        app_icons.bind_menu_button(&menu_btn);
-
-        let ellipsis = gtk_theme::ellipsis_menu_glyph();
-        let menu_word = gtk::Label::new(Some("Menu"));
-        menu_word.add_css_class("files-menu-label");
-        let menu_face = gtk::Stack::new();
-        menu_face.set_hhomogeneous(true);
-        menu_face.set_vhomogeneous(true);
-        menu_face.set_transition_type(gtk::StackTransitionType::None);
-        menu_face.add_named(&ellipsis, Some("dots"));
-        menu_face.add_named(&menu_word, Some("menu"));
-        menu_face.set_visible_child_name("dots");
-        menu_btn.set_child(Some(&menu_face));
-        if let Some(popover) = menu_btn.popover() {
-            let face = menu_face.clone();
-            popover.connect_show(move |_| {
-                face.set_visible_child_name("menu");
-            });
-            let face = menu_face.clone();
-            popover.connect_hide(move |_| {
-                face.set_visible_child_name("dots");
-            });
-        }
 
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
         back_btn.set_tooltip_text(Some("Back"));
@@ -173,7 +156,7 @@ impl FilesWindow {
         toolbar_start.set_halign(gtk::Align::Fill);
         toolbar_start.set_valign(gtk::Align::Center);
         toolbar_start.append(&places_header);
-        toolbar_start.append(&menu_btn);
+        toolbar_start.append(reveal_menubar.controls());
         toolbar_start.append(&nav);
         toolbar_start.append(&pathbar.root);
         header.pack_start(&toolbar_start);
@@ -218,7 +201,7 @@ impl FilesWindow {
         dual_row.set_valign(gtk::Align::Center);
         dual_row.set_margin_end(8);
         dual_row.set_tooltip_text(Some("Dual panel (Ctrl+Alt+N)"));
-        dual_row.set_visible(cfg.view.show_dual_panel);
+        dual_row.set_visible(false);
         let dual_label = gtk::Label::new(Some("Dual Panel"));
         dual_label.add_css_class("dim-label");
         let dual_pane = gtk::Switch::new();
@@ -227,6 +210,21 @@ impl FilesWindow {
         dual_pane.set_active(cfg.view.dual_panel);
         dual_row.append(&dual_label);
         dual_row.append(&dual_pane);
+        let git_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        git_row.set_valign(gtk::Align::Center);
+        git_row.set_margin_end(8);
+        git_row.set_tooltip_text(Some("Turn git folder colors on or off"));
+        git_row.set_visible(false);
+        let git_label = gtk::Label::new(Some("Git Colors"));
+        git_label.add_css_class("dim-label");
+        let git_colors = gtk::Switch::new();
+        git_colors.set_valign(gtk::Align::Center);
+        git_colors.set_tooltip_text(Some(
+            "Blue added, orange modified, red deleted",
+        ));
+        git_colors.set_active(cfg.view.git_colors);
+        git_row.append(&git_label);
+        git_row.append(&git_colors);
         header.pack_end(&view_btn);
         header.pack_end(&search_btn);
         // Fixed-width chip immediately left of the magnifying-glass.
@@ -234,6 +232,7 @@ impl FilesWindow {
         // Pack after sync chip so it sits just left of search when Trash is open.
         header.pack_end(&empty_trash_btn);
         header.pack_end(&dual_row);
+        header.pack_end(&git_row);
         window.set_titlebar(Some(&header));
 
         let sidebar = Sidebar::new();
@@ -351,6 +350,9 @@ impl FilesWindow {
             dual_pane: dual_pane.clone(),
             dual_row: dual_row.clone(),
             dual_busy: Cell::new(false),
+            git_colors: git_colors.clone(),
+            git_row: git_row.clone(),
+            menu_open: Cell::new(false),
             sidebar: Rc::clone(&sidebar),
             pathbar: Rc::clone(&pathbar),
             search: Rc::clone(&search),
@@ -491,6 +493,7 @@ impl FilesWindow {
         }
 
         // After pathbar/sidebar callbacks are wired — first tab syncs chrome into them.
+        crate::git_status::set_colors_enabled(cfg.view.show_git_colors && cfg.view.git_colors);
         fw.add_tab(Some(gio::File::for_path(util::home_dir())));
         {
             let fw2 = Rc::clone(&fw);
@@ -513,6 +516,25 @@ impl FilesWindow {
         }
         if cfg.view.show_dual_panel && cfg.view.dual_panel {
             fw.open_dual_pane();
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            git_colors.connect_active_notify(move |sw| {
+                let on = sw.is_active();
+                {
+                    let mut c = fw2.config.borrow_mut();
+                    c.view.git_colors = on;
+                    c.save();
+                }
+                fw2.apply_git_color_setting();
+            });
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            reveal_menubar.hamburger().connect_toggled(move |btn| {
+                fw2.menu_open.set(btn.is_active());
+                fw2.sync_header_toggles();
+            });
         }
         fw.wire_pane_switch(&right_notebook, true);
 
@@ -938,6 +960,27 @@ impl FilesWindow {
         self.sync_chrome();
     }
 
+    fn sync_header_toggles(&self) {
+        let open = self.menu_open.get();
+        let view = self.config.borrow().view.clone();
+        self.dual_row.set_visible(open && view.show_dual_panel);
+        self.git_row.set_visible(open && view.show_git_colors);
+    }
+
+    fn apply_git_color_setting(&self) {
+        let on = {
+            let view = &self.config.borrow().view;
+            view.show_git_colors && view.git_colors
+        };
+        crate::git_status::set_colors_enabled(on);
+        for tab in self.tabs.borrow().iter() {
+            tab.apply_git_colors(on);
+        }
+        for tab in self.right_tabs.borrow().iter() {
+            tab.apply_git_colors(on);
+        }
+    }
+
     fn close_dual_pane(&self) {
         self.close_dual_pane_view();
         self.sync_dual_switch(false);
@@ -1223,7 +1266,7 @@ impl FilesWindow {
             fw.close_current_tab();
         });
         bind(win, "dual-pane", self, |fw, _, _| {
-            if !fw.dual_row.is_visible() {
+            if !fw.config.borrow().view.show_dual_panel {
                 return;
             }
             fw.dual_pane.set_active(!fw.dual_pane.is_active());
@@ -1238,12 +1281,12 @@ impl FilesWindow {
             let fw = Rc::clone(self);
             action.connect_change_state(move |action, state| {
                 let active = state.and_then(|s| s.get::<bool>()).unwrap_or(false);
-                fw.dual_row.set_visible(active);
                 {
                     let mut c = fw.config.borrow_mut();
                     c.view.show_dual_panel = active;
                     c.save();
                 }
+                fw.sync_header_toggles();
                 if active {
                     if fw.dual_pane.is_active() {
                         fw.open_dual_pane();
@@ -1251,6 +1294,27 @@ impl FilesWindow {
                 } else {
                     fw.close_dual_pane_view();
                 }
+                action.set_state(&active.to_variant());
+            });
+            win.add_action(&action);
+        }
+        {
+            let show = self.config.borrow().view.show_git_colors;
+            let action = gio::SimpleAction::new_stateful(
+                "show-git-colors",
+                None,
+                &show.to_variant(),
+            );
+            let fw = Rc::clone(self);
+            action.connect_change_state(move |action, state| {
+                let active = state.and_then(|s| s.get::<bool>()).unwrap_or(false);
+                {
+                    let mut c = fw.config.borrow_mut();
+                    c.view.show_git_colors = active;
+                    c.save();
+                }
+                fw.sync_header_toggles();
+                fw.apply_git_color_setting();
                 action.set_state(&active.to_variant());
             });
             win.add_action(&action);
@@ -2725,6 +2789,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&view, "Reload", "win.reload");
     // Check item: shows or hides the header switch. The switch is the second setting.
     view.append(Some("Dual Panel"), Some("win.show-dual-panel"));
+    view.append(Some("Git Colors"), Some("win.show-git-colors"));
     icons.append_action(&view, "Toggle List/Grid", "win.toggle-view");
     // Toggle item: plain append so GTK can show a checkmark.
     view.append(Some("Show Hidden Files"), Some("win.show-hidden"));

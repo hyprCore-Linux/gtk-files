@@ -12,12 +12,12 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::SystemTime;
 
-use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gdk_pixbuf::Pixbuf;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
+use gtk4 as gtk;
 
 const MAX_WORKERS: usize = 3;
 const MAX_QUEUED: usize = 64;
@@ -371,6 +371,10 @@ pub fn apply_thumbnail(
     image.set_from_gicon(&crate::util::icon_for_info(info, false));
 
     if !is_thumbnailable(info) {
+        return;
+    }
+    // A GVFS FUSE path still reads the file over SFTP and stalls the mount.
+    if crate::network::uri_is_network_scheme(&file.uri()) {
         return;
     }
 

@@ -7,11 +7,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
+use gtk4 as gtk;
 
 use crate::config::Config;
 use crate::dnd;
@@ -21,7 +21,7 @@ use crate::sync_status::{self, SyncFileState};
 use crate::thumbnails;
 use crate::util::{
     self, can_write, content_type_description, display_name, format_mtime, format_size,
-    icon_for_info, is_directory, is_hidden, is_symlink, title_for_location, FILE_ATTRIBUTES,
+    icon_for_info, is_directory, is_hidden, is_symlink, listing_attributes, title_for_location,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,8 +93,11 @@ impl FolderTab {
     pub fn new(config: &Config, start: Option<gio::File>) -> Rc<Self> {
         let start_file = start.unwrap_or_else(|| gio::File::for_path(util::home_dir()));
 
-        let directory = gtk::DirectoryList::new(Some(FILE_ATTRIBUTES), Some(&start_file));
-        directory.set_monitored(true);
+        let directory = gtk::DirectoryList::new(
+            Some(listing_attributes(is_network_file(&start_file))),
+            Some(&start_file),
+        );
+        directory.set_monitored(!is_network_file(&start_file));
 
         let show_hidden_rc = Rc::new(RefCell::new(config.view.show_hidden));
         let search_query_rc = Rc::new(RefCell::new(String::new()));
@@ -132,6 +135,7 @@ impl FolderTab {
 
         let sorter = gtk::CustomSorter::new(|_a, _b| gtk::Ordering::Equal);
         let flat_model = gtk::SortListModel::new(Some(flattened), Some(sorter.clone()));
+        flat_model.set_incremental(true);
 
         let tree_model = {
             let show_hidden = Rc::clone(&show_hidden_rc);
@@ -152,6 +156,10 @@ impl FolderTab {
                     return None;
                 }
                 let file = file_from_info(info)?;
+                // A child DirectoryList would open another SFTP listing per folder.
+                if is_network_file(&file) {
+                    return None;
+                }
                 Some(make_child_model(
                     &file,
                     Rc::clone(&show_hidden),
@@ -169,12 +177,12 @@ impl FolderTab {
         let tree_anchor = Rc::new(RefCell::new(None));
         let grid_anchor = Rc::new(RefCell::new(None));
 
-        let on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>> =
-            Rc::new(RefCell::new(None));
+        let on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>> = Rc::new(RefCell::new(None));
         let on_middle: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>> =
             Rc::new(RefCell::new(None));
-        let on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>> =
-            Rc::new(RefCell::new(None));
+        let on_context: Rc<
+            RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>,
+        > = Rc::new(RefCell::new(None));
         let on_refresh: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
         let icon_size = Rc::new(RefCell::new(config.view.icon_size));
@@ -225,7 +233,11 @@ impl FolderTab {
         } else {
             ViewMode::List
         };
-        stack.set_visible_child_name(if mode == ViewMode::Grid { "grid" } else { "list" });
+        stack.set_visible_child_name(if mode == ViewMode::Grid {
+            "grid"
+        } else {
+            "list"
+        });
 
         let status = gtk::Label::new(None);
         status.set_xalign(0.0);
@@ -330,25 +342,17 @@ impl FolderTab {
         // Drop onto empty space in the current folder view.
         {
             let tab2 = Rc::clone(&tab);
-            dnd::attach_drop_target(
-                &list_scroll,
-                move || tab2.location_path(),
-                {
-                    let tab2 = Rc::clone(&tab);
-                    move || tab2.refresh()
-                },
-            );
+            dnd::attach_drop_target(&list_scroll, move || tab2.location_path(), {
+                let tab2 = Rc::clone(&tab);
+                move || tab2.refresh()
+            });
         }
         {
             let tab2 = Rc::clone(&tab);
-            dnd::attach_drop_target(
-                &grid_scroll,
-                move || tab2.location_path(),
-                {
-                    let tab2 = Rc::clone(&tab);
-                    move || tab2.refresh()
-                },
-            );
+            dnd::attach_drop_target(&grid_scroll, move || tab2.location_path(), {
+                let tab2 = Rc::clone(&tab);
+                move || tab2.refresh()
+            });
         }
 
         // Right-click empty view space → background menu (New Folder, Paste, …).
@@ -401,7 +405,10 @@ impl FolderTab {
         *self.on_location.borrow_mut() = Some(Rc::new(f));
     }
 
-    pub fn set_on_context<F: Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64) + 'static>(&self, f: F) {
+    pub fn set_on_context<F: Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64) + 'static>(
+        &self,
+        f: F,
+    ) {
         *self.on_context.borrow_mut() = Some(Rc::new(f));
     }
 
@@ -431,9 +438,7 @@ impl FolderTab {
 
     pub fn navigate(&self, file: gio::File, push_history: bool) {
         // Skip reload when already here (sidebar may fire selected + activated).
-        if util::is_virtual_places_location(&file)
-            && self.location.borrow().uri() == file.uri()
-        {
+        if util::is_virtual_places_location(&file) && self.location.borrow().uri() == file.uri() {
             self.rebuild_virtual_places_list(&file);
             if let Some(cb) = self.on_location.borrow().as_ref() {
                 cb(file);
@@ -478,8 +483,9 @@ impl FolderTab {
             self.rebuild_virtual_places_list(&file);
         } else {
             self.ghost_store.remove_all();
+            apply_listing_mode(&self.directory, &file);
             self.directory.set_file(Some(&file));
-            self.directory.set_monitored(true);
+            self.directory.set_monitored(!is_network_file(&file));
         }
         self.tree_selection.unselect_all();
         self.grid_selection.unselect_all();
@@ -548,6 +554,10 @@ impl FolderTab {
     }
 
     fn spawn_git_scan(&self, gen: u64, discover: bool, force: bool) {
+        if !git_status::colors_enabled() {
+            self.restyle_git_ui();
+            return;
+        }
         let latest = Arc::clone(&self.git_gen);
         let list = self.list_view.clone();
         let grid = self.grid_view.clone();
@@ -555,7 +565,9 @@ impl FolderTab {
             self.restyle_git_ui();
             return;
         };
-        if util::is_trash_location(&self.location.borrow()) {
+        if util::is_trash_location(&self.location.borrow())
+            || is_network_file(&self.location.borrow())
+        {
             self.restyle_git_ui();
             return;
         }
@@ -568,8 +580,22 @@ impl FolderTab {
     }
 
     fn start_git_scan(&self, discover: bool, force: bool) {
+        if !git_status::colors_enabled() {
+            self.restyle_git_ui();
+            return;
+        }
         let gen = self.git_gen.fetch_add(1, AtomicOrdering::Relaxed) + 1;
         self.spawn_git_scan(gen, discover, force);
+    }
+
+    /// Paint or clear git name colors after the header switch changes.
+    pub fn apply_git_colors(&self, on: bool) {
+        if on {
+            self.start_git_scan(true, true);
+        } else {
+            self.git_gen.fetch_add(1, AtomicOrdering::Relaxed);
+            self.restyle_git_ui();
+        }
     }
 
     /// Re-run porcelain for known repos without cancelling an in-flight discover.
@@ -620,8 +646,7 @@ impl FolderTab {
                 continue;
             }
             let is_dir = sync_status::tombstone_looks_like_dir(&status, &tomb.path);
-            let info =
-                sync_status::make_deleted_file_info(&root, &tomb.path, tomb.ts, is_dir);
+            let info = sync_status::make_deleted_file_info(&root, &tomb.path, tomb.ts, is_dir);
             self.ghost_store.append(&info);
         }
     }
@@ -685,7 +710,11 @@ impl FolderTab {
     pub fn set_view_mode(&self, mode: ViewMode) {
         *self.view_mode.borrow_mut() = mode;
         self.stack
-            .set_visible_child_name(if mode == ViewMode::Grid { "grid" } else { "list" });
+            .set_visible_child_name(if mode == ViewMode::Grid {
+                "grid"
+            } else {
+                "list"
+            });
     }
 
     pub fn toggle_view_mode(&self) {
@@ -712,7 +741,11 @@ impl FolderTab {
         *self.show_hidden.borrow()
     }
 
-    pub fn set_search_query(self: &Rc<Self>, q: String, on_status: impl Fn(Option<String>) + 'static) {
+    pub fn set_search_query(
+        self: &Rc<Self>,
+        q: String,
+        on_status: impl Fn(Option<String>) + 'static,
+    ) {
         let q = q.trim().to_string();
         *self.search_query.borrow_mut() = q.clone();
         *self.tree_search_query.borrow_mut() = q.clone();
@@ -779,10 +812,7 @@ impl FolderTab {
                 } else if total >= search::MAX_NAME_HITS {
                     format!("{total}+ matches (truncated)")
                 } else {
-                    format!(
-                        "{total} match{}",
-                        if total == 1 { "" } else { "es" }
-                    )
+                    format!("{total} match{}", if total == 1 { "" } else { "es" })
                 };
                 on_status(Some(msg.clone()));
                 tab.status.set_text(&msg);
@@ -898,10 +928,7 @@ impl FolderTab {
         else {
             return;
         };
-        let already_there = self
-            .location_path()
-            .as_ref()
-            .is_some_and(|p| p == parent);
+        let already_there = self.location_path().as_ref().is_some_and(|p| p == parent);
         if !already_there {
             self.navigate_path(parent, true);
         }
@@ -988,8 +1015,9 @@ impl FolderTab {
         // the same location is a no-op on DirectoryList.
         self.directory.set_monitored(false);
         self.directory.set_file(None::<&gio::File>);
+        apply_listing_mode(&self.directory, &file);
         self.directory.set_file(Some(&file));
-        self.directory.set_monitored(true);
+        self.directory.set_monitored(!is_network_file(&file));
         self.refresh_sync_ui();
         self.update_status();
         if let Some(path) = self.location_path() {
@@ -1003,6 +1031,9 @@ impl FolderTab {
     }
 
     pub fn resume_directory_monitor(&self) {
+        if is_network_file(&self.location()) {
+            return;
+        }
         self.directory.set_monitored(true);
     }
 
@@ -1041,7 +1072,8 @@ impl FolderTab {
         let sort_by = self.sort_by.borrow().clone();
         let folders_first = *self.sort_folders_first.borrow();
         let reversed = *self.sort_reversed.borrow();
-        self.sorter.set_sort_func(move |a, b| compare_infos(a, b, &sort_by, folders_first, reversed));
+        self.sorter
+            .set_sort_func(move |a, b| compare_infos(a, b, &sort_by, folders_first, reversed));
         self.sorter.changed(gtk::SorterChange::Different);
         for s in self.child_sorters.borrow().iter() {
             s.changed(gtk::SorterChange::Different);
@@ -1080,11 +1112,9 @@ impl FolderTab {
         let tree = self.tree_selection.clone();
         let grid = self.grid_selection.clone();
         let view_mode = self.view_mode.clone();
-        let update = move || {
-            match *view_mode.borrow() {
-                ViewMode::List => update_status_label(&status, &tree),
-                ViewMode::Grid => update_status_label(&status, &grid),
-            }
+        let update = move || match *view_mode.borrow() {
+            ViewMode::List => update_status_label(&status, &tree),
+            ViewMode::Grid => update_status_label(&status, &grid),
         };
         {
             let update = update.clone();
@@ -1152,12 +1182,12 @@ fn make_child_model(
     child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>>,
     child_sorters: Rc<RefCell<Vec<gtk::CustomSorter>>>,
 ) -> gio::ListModel {
-    let directory = gtk::DirectoryList::new(Some(FILE_ATTRIBUTES), Some(file));
-    directory.set_monitored(true);
+    let directory =
+        gtk::DirectoryList::new(Some(listing_attributes(is_network_file(file))), Some(file));
+    directory.set_monitored(!is_network_file(file));
 
-    let filter = gtk::CustomFilter::new(move |obj| {
-        file_info_visible(obj, *show_hidden.borrow(), "")
-    });
+    let filter =
+        gtk::CustomFilter::new(move |obj| file_info_visible(obj, *show_hidden.borrow(), ""));
     child_filters.borrow_mut().push(filter.clone());
     let filter_model = gtk::FilterListModel::new(Some(directory), Some(filter));
 
@@ -1172,7 +1202,17 @@ fn make_child_model(
     });
     child_sorters.borrow_mut().push(sorter.clone());
     let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter));
+    sort_model.set_incremental(true);
     sort_model.upcast()
+}
+
+fn is_network_file(file: &gio::File) -> bool {
+    crate::network::uri_is_network_scheme(&file.uri())
+}
+
+/// Attribute set for this location. Remote mounts skip content-type sniffing.
+fn apply_listing_mode(directory: &gtk::DirectoryList, file: &gio::File) {
+    directory.set_attributes(Some(listing_attributes(is_network_file(file))));
 }
 
 fn sort_key_from_column_title(title: &str) -> Option<&'static str> {
@@ -1252,10 +1292,16 @@ fn compare_infos(
     if ord == Ordering::Equal {
         ord = match sort_by {
             "size" => ia.size().cmp(&ib.size()),
-            "type" => content_type_description(ia).cmp(&content_type_description(ib)),
+            "type" => type_sort_key(ia).cmp(&type_sort_key(ib)),
             "modified" => {
-                let ta = ia.modification_date_time().map(|d| d.to_unix()).unwrap_or(0);
-                let tb = ib.modification_date_time().map(|d| d.to_unix()).unwrap_or(0);
+                let ta = ia
+                    .modification_date_time()
+                    .map(|d| d.to_unix())
+                    .unwrap_or(0);
+                let tb = ib
+                    .modification_date_time()
+                    .map(|d| d.to_unix())
+                    .unwrap_or(0);
                 ta.cmp(&tb)
             }
             _ => {
@@ -1279,6 +1325,23 @@ fn compare_infos(
     }
 }
 
+/// Sort key for the Type column. Uses the stored content type, or the
+/// filename extension. Does not query the mime database.
+fn type_sort_key(info: &gio::FileInfo) -> String {
+    if is_directory(info) {
+        return String::new();
+    }
+    if let Some(ct) = info.content_type() {
+        if !ct.is_empty() {
+            return ct.to_string();
+        }
+    }
+    info.name()
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
 /// Corner badge overlaid on file/folder icons (GtkImage does not reliably
 /// composite GEmblemedIcon, so we draw our own badges).
 fn make_badge_emblem(
@@ -1299,17 +1362,32 @@ fn make_badge_emblem(
 
 fn make_symlink_emblem(pixel_size: i32) -> gtk::Image {
     // Bottom-right — classic symlink badge.
-    make_badge_emblem(pixel_size, "symlink-emblem", gtk::Align::End, gtk::Align::End)
+    make_badge_emblem(
+        pixel_size,
+        "symlink-emblem",
+        gtk::Align::End,
+        gtk::Align::End,
+    )
 }
 
 fn make_lock_emblem(pixel_size: i32) -> gtk::Image {
     // Bottom-left — no-write / read-only lock (keeps clear of the symlink badge).
-    make_badge_emblem(pixel_size, "lock-emblem", gtk::Align::Start, gtk::Align::End)
+    make_badge_emblem(
+        pixel_size,
+        "lock-emblem",
+        gtk::Align::Start,
+        gtk::Align::End,
+    )
 }
 
 fn make_sync_emblem(pixel_size: i32) -> gtk::Image {
     // Top-right — gtk-sync state (up to date / syncing / deleted).
-    make_badge_emblem(pixel_size, "sync-emblem", gtk::Align::End, gtk::Align::Start)
+    make_badge_emblem(
+        pixel_size,
+        "sync-emblem",
+        gtk::Align::End,
+        gtk::Align::Start,
+    )
 }
 
 fn sync_state_for_info(info: &gio::FileInfo) -> Option<SyncFileState> {
@@ -1379,6 +1457,7 @@ fn apply_git_classes(row: &impl IsA<gtk::Widget>, state: Option<GitDecor>) {
 fn set_git_css_classes(widget: &gtk::Widget, state: Option<GitDecor>) {
     widget.remove_css_class("git-untracked");
     widget.remove_css_class("git-modified");
+    widget.remove_css_class("git-deleted");
     widget.remove_css_class("git-conflict");
     if let Some(state) = state {
         widget.add_css_class(state.css_class());
@@ -1386,19 +1465,28 @@ fn set_git_css_classes(widget: &gtk::Widget, state: Option<GitDecor>) {
 }
 
 fn apply_git_row_style(row: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
-    apply_git_classes(row, git_state_for_info(info));
+    let state = if git_status::colors_enabled() {
+        git_state_for_info(info)
+    } else {
+        None
+    };
+    apply_git_classes(row, state);
 }
 
 /// Apply git name colors on every `.file-row-content` under `root`.
 fn restyle_git_rows(root: &gtk::Widget) {
     if root.has_css_class("file-row-content") {
-        let state = unsafe {
-            root.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
-                .and_then(|ptr| {
-                    ptr.as_ref().borrow().as_ref().and_then(|(_, is_dir, path)| {
-                        git_status::state_for_path(path, *is_dir)
+        let state = if git_status::colors_enabled() {
+            unsafe {
+                root.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
+                    .and_then(|ptr| {
+                        ptr.as_ref().borrow().as_ref().and_then(|(_, is_dir, path)| {
+                            git_status::state_for_path(path, *is_dir)
+                        })
                     })
-                })
+            }
+        } else {
+            None
         };
         apply_git_classes(root, state);
     }
@@ -1567,7 +1655,10 @@ fn activate_tree_at(
         return;
     }
     let Some(file) = resolve_file(&info, None) else {
-        eprintln!("gtk-files: could not resolve file for “{}”", display_name(&info));
+        eprintln!(
+            "gtk-files: could not resolve file for “{}”",
+            display_name(&info)
+        );
         return;
     };
     if let Some(cb) = on_open.borrow().as_ref() {
@@ -1724,7 +1815,11 @@ fn apply_pointer_selection(
     if shift {
         let start = anchor.borrow().unwrap_or(pos).min(n - 1);
         let pos = pos.min(n - 1);
-        let (lo, hi) = if start <= pos { (start, pos) } else { (pos, start) };
+        let (lo, hi) = if start <= pos {
+            (start, pos)
+        } else {
+            (pos, start)
+        };
         // Shift replaces with the range; Ctrl+Shift adds the range.
         selection.select_range(lo, hi - lo + 1, !ctrl);
         return None;
@@ -2017,10 +2112,7 @@ fn build_tree_column_view(
             let Some(sync_em) = overlay_badge(&icon_overlay, "sync-emblem") else {
                 return;
             };
-            let Some(label) = icon_overlay
-                .next_sibling()
-                .and_downcast::<gtk::Label>()
-            else {
+            let Some(label) = icon_overlay.next_sibling().and_downcast::<gtk::Label>() else {
                 return;
             };
             label.set_text(&display_name(&info));
@@ -2091,10 +2183,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         });
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(info) = item
-                .item()
-                .and_then(|o| info_from_selection_item(&o))
-            else {
+            let Some(info) = item.item().and_then(|o| info_from_selection_item(&o)) else {
                 return;
             };
             let label = item.child().and_downcast::<gtk::Label>().unwrap();
@@ -2123,10 +2212,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         });
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(info) = item
-                .item()
-                .and_then(|o| info_from_selection_item(&o))
-            else {
+            let Some(info) = item.item().and_then(|o| info_from_selection_item(&o)) else {
                 return;
             };
             let label = item.child().and_downcast::<gtk::Label>().unwrap();
@@ -2154,10 +2240,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         });
         factory.connect_bind(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(info) = item
-                .item()
-                .and_then(|o| info_from_selection_item(&o))
-            else {
+            let Some(info) = item.item().and_then(|o| info_from_selection_item(&o)) else {
                 return;
             };
             let label = item.child().and_downcast::<gtk::Label>().unwrap();
@@ -2423,10 +2506,7 @@ fn build_grid_view(
         let Some(sync_em) = overlay_badge(&icon_overlay, "sync-emblem") else {
             return;
         };
-        let Some(label) = icon_overlay
-            .next_sibling()
-            .and_downcast::<gtk::Label>()
-        else {
+        let Some(label) = icon_overlay.next_sibling().and_downcast::<gtk::Label>() else {
             return;
         };
         label.set_text(&display_name(&info));

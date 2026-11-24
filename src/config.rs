@@ -45,6 +45,10 @@ pub struct ViewConfig {
     pub show_dual_panel: bool,
     /// Header Dual Panel switch: the second folder column is open.
     pub dual_panel: bool,
+    /// View menu: show the header Git Colors switch. Off until the user turns it on.
+    pub show_git_colors: bool,
+    /// Header Git Colors switch: color added, modified, and deleted names.
+    pub git_colors: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +94,8 @@ impl Default for ViewConfig {
             thumbnail_size: "medium".into(),
             show_dual_panel: false,
             dual_panel: false,
+            show_git_colors: false,
+            git_colors: false,
         }
     }
 }

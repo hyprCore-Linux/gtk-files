@@ -537,7 +537,9 @@ fn load_css() {
         );
     }
 
-    // USER priority: beat suite chrome / hyprcore theme for header strip + git colors.
+    // Above USER. Suite chrome is also USER and is installed later, and GTK
+    // lets that later sheet replace `color` even when our selectors are
+    // more specific — which left every folder name the theme foreground.
     let git_provider = gtk::CssProvider::new();
     git_provider.load_from_data(
         "
@@ -588,6 +590,11 @@ fn load_css() {
         .file-row-content.git-modified label {
             color: #ea580c;
         }
+        label.git-deleted,
+        .file-row-content.git-deleted label.git-name,
+        .file-row-content.git-deleted label {
+            color: #dc2626;
+        }
         label.git-conflict,
         .file-row-content.git-conflict label.git-name,
         .file-row-content.git-conflict label {
@@ -609,7 +616,7 @@ fn load_css() {
         gtk::style_context_add_provider_for_display(
             &display,
             &git_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_USER,
+            gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
         );
     }
 
