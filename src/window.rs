@@ -225,6 +225,8 @@ impl FilesWindow {
         git_colors.set_active(cfg.view.git_colors);
         git_row.append(&git_label);
         git_row.append(&git_colors);
+        reveal_menubar.keep_open_on(&dual_row);
+        reveal_menubar.keep_open_on(&git_row);
         header.pack_end(&view_btn);
         header.pack_end(&search_btn);
         // Fixed-width chip immediately left of the magnifying-glass.
